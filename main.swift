@@ -336,6 +336,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         stats.save()
     }
 
+    /// Renders each layer to PNG plus an animated GIF cycling through them.
+    /// Used for README assets and for sharing one's keymap as an image.
+    func exportAssets(to dirPath: String) {
+        let dir = URL(fileURLWithPath: dirPath)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        store.load()
+        let kb = KeyboardView(frame: NSRect(x: 0, y: 0, width: kbSize.width, height: kbSize.height))
+        kb.store = store
+        let pad: CGFloat = 16
+        let size = NSSize(width: kbSize.width + pad * 2, height: kbSize.height + pad * 2 + 18)
+
+        var frames: [NSImage] = []
+        for (i, layer) in store.layers.enumerated() {
+            kb.layerIndex = i
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
+                                             pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
+                                             samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+            else { continue }
+            rep.size = size
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            NSColor(white: 0.13, alpha: 1).setFill()
+            NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 14, yRadius: 14).fill()
+            let title = "\(store.preset.name) — \(layer.displayName)"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.75)
+            ]
+            NSAttributedString(string: title, attributes: attrs)
+                .draw(at: NSPoint(x: pad, y: size.height - 14))
+            let ctx = NSGraphicsContext.current!.cgContext
+            ctx.translateBy(x: pad, y: pad)
+            kb.frame = NSRect(origin: .zero, size: kbSize)
+            kb.draw(kb.bounds)
+            NSGraphicsContext.restoreGraphicsState()
+            if let png = rep.representation(using: .png, properties: [:]) {
+                let url = dir.appendingPathComponent("layer-\(i).png")
+                try? png.write(to: url)
+                print("wrote \(url.path)")
+            }
+            frames.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
+        }
+
+        guard frames.count > 1 else { return }
+        let gifData = NSMutableData()
+        if let dest = CGImageDestinationCreateWithData(gifData, "com.compuserve.gif" as CFString,
+                                                       frames.count, nil) {
+            let props = [kCGImagePropertyGIFDictionary as String:
+                            [kCGImagePropertyGIFLoopCount as String: 0]] as CFDictionary
+            CGImageDestinationSetProperties(dest, props)
+            for f in frames {
+                let frameProps = [kCGImagePropertyGIFDictionary as String:
+                                    [kCGImagePropertyGIFDelayTime as String: 0.9]] as CFDictionary
+                if let cg = f.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    CGImageDestinationAddImage(dest, cg, frameProps)
+                }
+            }
+            if CGImageDestinationFinalize(dest) {
+                let url = dir.appendingPathComponent("layers.gif")
+                try? (gifData as Data).write(to: url)
+                print("wrote \(url.path)")
+            }
+        }
+    }
+
+    private var kbSize: NSSize {
+        NSSize(width: 12 * U + GAP + 4, height: 6 * U + 4)
+    }
+
     private func rebuildUI() {
         let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: kbView.frame.width + 20,
                                                        height: kbView.frame.height + 62))
@@ -672,6 +742,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         CGEvent.tapEnable(tap: port, enable: true)
         statusDot?.layer?.backgroundColor = NSColor.systemGreen.cgColor
     }
+}
+
+let args = ProcessInfo.processInfo.arguments
+if let idx = args.firstIndex(of: "--export-assets"), args.count > idx + 1 {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    let d = AppDelegate()
+    d.exportAssets(to: args[idx + 1])
+    exit(0)
 }
 
 let app = NSApplication.shared
