@@ -20,6 +20,17 @@ struct KeymapLayer {
     var cells: [KeyCell]
 }
 
+
+struct ComboSpec {
+    let positions: [Int]
+    let label: String
+}
+
+struct KeymapDoc {
+    var layers: [KeymapLayer]
+    var combos: [ComboSpec] = []
+}
+
 struct Binding {
     var ref: String
     var params: [String]
@@ -45,11 +56,52 @@ final class ZMKKeymapParser {
         "key_repeat": 0,
     ]
 
-    func parse(_ text: String) -> [KeymapLayer] {
+    private(set) var combos: [ComboSpec] = []
+
+    /// Parse layers plus combos into a full document.
+    func parseDoc(_ text: String) -> KeymapDoc {
         let src = stripComments(text)
         parseBehaviors(src)
         parseMacros(src)
-        return parseLayers(src)
+        parseCombos(src)
+        return KeymapDoc(layers: parseLayers(src), combos: combos)
+    }
+
+    func parse(_ text: String) -> [KeymapLayer] {
+        parseDoc(text).layers
+    }
+
+    private func parseCombos(_ src: String) {
+        combos = []
+        guard let region = src.range(of: "zmk,combos") else { return }
+        var cursor = region.upperBound
+        let end = src.index(region.upperBound, offsetBy: 2000, limitedBy: src.endIndex) ?? src.endIndex
+        while cursor < end,
+              let posRange = src.range(of: "key-positions", range: cursor..<end) {
+            let after = src[posRange.upperBound..<end]
+            guard let eq = after.firstIndex(of: "="),
+                  let open = after[eq...].firstIndex(of: "<"),
+                  let close = after[open...].firstIndex(of: ">") else { break }
+            let numbers = after[after.index(after: open)..<close]
+                .split(whereSeparator: { $0.isWhitespace })
+                .compactMap { Int($0) }
+            let nodeStart = src.index(posRange.lowerBound, offsetBy: -300, limitedBy: src.startIndex) ?? src.startIndex
+            let nodeText = String(src[nodeStart..<close])
+            var label = "combo"
+            if let br = nodeText.range(of: "bindings") {
+                let bindBody = String(nodeText[br.upperBound...].prefix { $0 != ";" })
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " =<>"))
+                var toks = bindBody.split(whereSeparator: { $0.isWhitespace || $0 == "," }).map(String.init)
+                toks.removeAll { $0.hasPrefix("<&") || $0.hasPrefix("&") || $0 == "=" || $0 == "<" }
+                if let keyTok = toks.first(where: { !$0.isEmpty }) {
+                    label = keyLabel(keyTok)
+                }
+            }
+            if numbers.count >= 2 {
+                combos.append(ComboSpec(positions: numbers, label: label))
+            }
+            cursor = close
+        }
     }
 
     // MARK: - Extraction helpers

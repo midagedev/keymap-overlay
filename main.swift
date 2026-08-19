@@ -73,6 +73,7 @@ struct Palette {
 
 final class KeymapStore {
     private(set) var layers: [KeymapLayer] = []
+    private(set) var combos: [ComboSpec] = []
     private(set) var keymapURL: URL?
     private(set) var lastError: String?
     var preset = LayoutPreset.load()
@@ -102,7 +103,9 @@ final class KeymapStore {
             onReload?()
             return
         }
-        layers = ZMKKeymapParser().parse(text)
+        let doc = ZMKKeymapParser().parseDoc(text)
+        layers = doc.layers
+        combos = doc.combos
         watch(target)
         onReload?()
     }
@@ -126,6 +129,8 @@ final class KeymapStore {
 final class KeyboardView: NSView {
     var store: KeymapStore!
     var heatmap = false
+    var learningMode = false
+    var combos: [ComboSpec] = []
     var layerIndex = 0 {
         didSet {
             needsDisplay = true
@@ -140,6 +145,34 @@ final class KeyboardView: NSView {
     var autoSwitch = true
     var lastFn = 1
     var layerHold = 0
+
+    /// Auto-hide: seconds since last key activity; the panel fades out
+    /// after the threshold (mirrors OverKeys' behavior).
+    var autoHideSeconds = 8
+    var lastActivity = Date()
+    var autoHideEnabled = true
+
+    func noteActivity() {
+        lastActivity = Date()
+        if alphaValue < 1 {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.2
+                self.animator().alphaValue = 1
+            })
+        }
+    }
+
+    func fadeOutIfIdle() {
+        guard autoHideEnabled, panel?.isVisible == true else { return }
+        if Date().timeIntervalSince(lastActivity) > Double(autoHideSeconds), alphaValue == 1 {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.6
+                self.animator().alphaValue = 0.12
+            })
+        }
+    }
+
+    weak var panel: NSPanel?
     var sentinels: [Int: Int] = [:]
 
     override func hitTest(_ p: NSPoint) -> NSView? { nil }
@@ -181,6 +214,65 @@ final class KeyboardView: NSView {
         return heldCodes.contains(code) && (!kd.needsCtrl || heldCtrl)
     }
 
+    /// Shift-reactive labels: pressing Shift swaps in the shifted symbol
+    /// (1 → !, ; → :) so the overlay reads like the keycaps do.
+    private static let shiftTable: [String: String] = [
+        "1": "!", "2": "@", "3": "#", "4": "$", "5": "%",
+        "6": "^", "7": "&", "8": "*", "9": "(", "0": ")",
+        "`": "~", "-": "_", "=": "+", "[": "{", "]": "}",
+        "\\": "|", ";": ":", "'": "\"", ",": "<", ".": ">", "/": "?",
+    ]
+
+    private func displayLabel(_ kd: KeyCell) -> String {
+        guard heldShift, layerIndex == 0, let shifted = Self.shiftTable[kd.main] else { return kd.main }
+        return shifted
+    }
+
+    /// Learning mode: tints keys by the finger that should press them,
+    /// following the standard ergonomic finger assignment.
+    private static let fingerColors: [(range: Range<Int>, color: NSColor, name: String)] = [
+        (0..<1, NSColor(calibratedRed: 0.95, green: 0.45, blue: 0.45, alpha: 0.45), "새끼"),
+        (1..<2, NSColor(calibratedRed: 0.95, green: 0.72, blue: 0.40, alpha: 0.45), "약지"),
+        (2..<3, NSColor(calibratedRed: 0.92, green: 0.92, blue: 0.45, alpha: 0.45), "중지"),
+        (3..<6, NSColor(calibratedRed: 0.55, green: 0.85, blue: 0.50, alpha: 0.45), "검지"),
+        (6..<9, NSColor(calibratedRed: 0.50, green: 0.80, blue: 0.90, alpha: 0.45), "검지"),
+        (9..<10, NSColor(calibratedRed: 0.70, green: 0.55, blue: 0.95, alpha: 0.45), "중지"),
+        (10..<11, NSColor(calibratedRed: 0.80, green: 0.45, blue: 0.85, alpha: 0.45), "약지"),
+        (11..<12, NSColor(calibratedRed: 0.92, green: 0.45, blue: 0.55, alpha: 0.45), "새끼"),
+    ]
+
+    private func learningFill(column: Int, base: NSColor) -> NSColor {
+        guard learningMode, column >= 0, column < 12 else { return base }
+        for (range, color, _) in Self.fingerColors where range.contains(column) {
+            return color
+        }
+        return base
+    }
+
+    private var heldShift = false
+
+    func setShift(_ on: Bool) {
+        guard on != heldShift else { return }
+        heldShift = on
+        needsDisplay = true
+    }
+
+    private func rectForComboDot(position: Int, cells: [(NSRect, KeyCell)]) -> NSPoint? {
+        // Flat position → screen cell: grid rows 0-3 then thumbs.
+        if position < 48 {
+            let ri = position / 12, ci = position % 12
+            for (r, _) in cells where r.maxY > CGFloat(5 - ri) * U && r.maxY <= CGFloat(6 - ri) * U + 2
+                && abs(r.minX - xFor(ci)) < 2 {
+                return NSPoint(x: r.midX, y: r.midY)
+            }
+            return nil
+        }
+        let slot = position - 48
+        guard slot < 5 else { return nil }
+        for (r, _) in cells where abs(r.minX - tx4(slot)) < 2 && r.maxY <= U + 4 { return NSPoint(x: r.midX, y: r.midY) }
+        return nil
+    }
+
     private func heatmapFill(base: NSColor, code: Int?) -> NSColor {
         guard heatmap, let code, stats.maxKeyCount > 0 else { return base }
         let maxN = Double(stats.maxKeyCount)
@@ -194,7 +286,8 @@ final class KeyboardView: NSView {
         let p = Palette.current()
         let para = NSMutableParagraphStyle()
         para.alignment = .center
-        for (rect, kd) in cells() {
+        let allCells = cells()
+        for (rect, kd) in allCells {
             let held = isHeld(kd)
             let path = NSBezierPath(roundedRect: rect, xRadius: R, yRadius: R)
             if held {
@@ -203,6 +296,12 @@ final class KeyboardView: NSView {
                 heatmapFill(base: kd.dim ? p.keyFillDim : p.keyFill, code: kd.code).setFill()
             }
             path.fill()
+            if learningMode {
+                // Column tinted by the finger that should press it.
+                let col = Int(round((rect.minX - 2 - (rect.minX > xFor(6) - U / 2 ? GAP : 0)) / U))
+                learningFill(column: col, base: .clear).setFill()
+                path.fill()
+            }
             if kd.accent && !held {
                 p.accent.setStroke()
                 path.lineWidth = 1.4
@@ -210,11 +309,12 @@ final class KeyboardView: NSView {
             }
             let alpha: CGFloat = kd.dim ? 0.35 : 1.0
             let mainColor = held ? p.heldText : p.text.withAlphaComponent(alpha)
-            let mainFont = NSFont.systemFont(ofSize: kd.main.count > 3 ? 8.5 : 12, weight: .semibold)
+            let label = displayLabel(kd)
+            let mainFont = NSFont.systemFont(ofSize: label.count > 3 ? 8.5 : 12, weight: .semibold)
             let attrs: [NSAttributedString.Key: Any] = [.font: mainFont, .foregroundColor: mainColor, .paragraphStyle: para]
             let mainRect = kd.sub == nil ? rect.insetBy(dx: 1, dy: 1)
                 : NSRect(x: rect.minX, y: rect.minY + 10, width: rect.width, height: rect.height - 12)
-            NSAttributedString(string: kd.main, attributes: attrs).draw(in: mainRect)
+            NSAttributedString(string: label, attributes: attrs).draw(in: mainRect)
             if let s = kd.sub {
                 let subAttrs: [NSAttributedString.Key: Any] = [
                     .font: NSFont.systemFont(ofSize: 7.5, weight: .medium),
@@ -223,6 +323,37 @@ final class KeyboardView: NSView {
                 ]
                 NSAttributedString(string: s, attributes: subAttrs)
                     .draw(in: NSRect(x: rect.minX, y: rect.minY + 1, width: rect.width, height: 10))
+            }
+        }
+
+        // Combos: dashed ring around each member key plus a shared label.
+        for combo in combos where !combo.positions.isEmpty {
+            var points: [NSPoint] = []
+            for pos in combo.positions {
+                if let pt = rectForComboDot(position: pos, cells: allCells) { points.append(pt) }
+            }
+            guard points.count == combo.positions.count else { continue }
+            for (i, pt) in points.enumerated() {
+                let ring = NSBezierPath(ovalIn: NSRect(x: pt.x - 4, y: pt.y - 4, width: 8, height: 8))
+                p.accent.setFill()
+                ring.fill()
+                if i == 0, points.count > 1 {
+                    let line = NSBezierPath()
+                    line.move(to: points[0])
+                    line.line(to: points[1])
+                    line.setLineDash([2, 2], count: 2, phase: 0)
+                    line.lineWidth = 1
+                    p.accent.setStroke()
+                    line.stroke()
+                }
+            }
+            if let first = points.first {
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 7.5, weight: .bold),
+                    .foregroundColor: p.accent
+                ]
+                NSAttributedString(string: combo.label, attributes: attrs)
+                    .draw(at: NSPoint(x: first.x + 6, y: first.y + 4))
             }
         }
     }
@@ -336,6 +467,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         buildStatsPanel()
         store.load()
         kbView.sentinels = store.sentinels
+        kbView.combos = store.combos
+        kbView.panel = panel
         installHotkeys()
         tryInstallTap()
         axTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
@@ -343,6 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             stats.tickLayer(self?.kbView.layerHold ?? self?.kbView.layerIndex ?? 0)
+            self?.kbView.fadeOutIfIdle()
         }
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in stats.save() }
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -524,6 +658,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.autoButton = autoButton
         title.addArrangedSubview(autoButton)
         heatButton = NSButton(title: "🔥", target: self, action: #selector(toggleHeatmap(_:)))
+        let learnButton = NSButton(title: "🎓", target: self, action: #selector(toggleLearning(_:)))
+        learnButton.bezelStyle = .texturedRounded
+        learnButton.controlSize = .mini
+        title.addArrangedSubview(learnButton)
         heatButton.bezelStyle = .texturedRounded
         heatButton.controlSize = .mini
         title.addArrangedSubview(heatButton)
@@ -642,6 +780,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func toggleHeatmap(_ sender: NSButton) {
         kbView.heatmap.toggle()
+        kbView.needsDisplay = true
+    }
+
+    @objc func toggleLearning(_ sender: NSButton) {
+        kbView.learningMode.toggle()
         kbView.needsDisplay = true
     }
 
@@ -811,11 +954,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         }
                     }
                     view.heldCtrl = event.flags.contains(.maskControl)
+                    view.setShift(event.flags.contains(.maskShift))
                 case .scrollWheel:
                     stats.recordScroll()
                     if view.autoSwitch && view.layerIndex == 0 { view.layerIndex = view.lastFn }
                 case .flagsChanged:
                     view.heldCtrl = event.flags.contains(.maskControl)
+                    view.setShift(event.flags.contains(.maskShift))
                 case .leftMouseDown, .leftMouseUp:
                     if t == .leftMouseDown {
                         view.heldMouse.insert(0)
@@ -829,6 +974,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 default: break
                 }
                 view.needsDisplay = true
+                view.noteActivity()
             }
             return Unmanaged.passUnretained(event)
         }

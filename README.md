@@ -74,6 +74,17 @@ spot on your layout:
 
 ### Everything else
 
+- **Auto-hide** — after 8 seconds of inactivity the overlay fades to
+  12% opacity; any keystroke brings it back instantly (inspired by
+  OverKeys)
+- **Combos** — key combos from the keymap are drawn as connected dots
+  on their member keys (ESC on Y+U in the screenshot above), borrowed
+  from keymap-drawer's combo visualization
+- **Learning mode** — 🎓 tints each column by the finger that should
+  press it, for touch-typing practice (OverKeys-inspired)
+- **Shift-reactive labels** — hold Shift and the base layer swaps in
+  shifted symbols (`1` → `!`, `;` → `:`) like real keycaps
+
 - USB/Bluetooth connection status, with per-half battery
   (`L 87% · R 74%` — reads every battery entry macOS exposes for the
   device, including the split peripheral's proxied battery)
