@@ -40,6 +40,48 @@ struct GlyphMote {
     var spin: CGFloat
 }
 
+/// Shaft colors that keep the dark 3-tone sprite readable.
+/// `ink` is the UI text color: light on a dark HUD, dark on a light HUD.
+private struct ShaftTone {
+    let well: NSColor
+    let dirtLo: NSColor
+    let dirtMid: NSColor
+    let dirtHi: NSColor
+    let stone: NSColor
+    let stoneMark: NSColor
+    let lip: NSColor
+    let vein: NSColor
+
+    static func make(_ ink: NSColor) -> ShaftTone {
+        let c = ink.usingColorSpace(.deviceRGB) ?? ink
+        let luma = 0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent
+        // Well is always lighter than the sprite's mid gray (~0.55) so the
+        // body reads. Dirt stays darker than the well (earth around a hole).
+        if Companion.exportShot || luma > 0.5 {
+            return ShaftTone(
+                well: NSColor(white: 0.74, alpha: 1),
+                dirtLo: NSColor(white: 0.26, alpha: 1),
+                dirtMid: NSColor(white: 0.32, alpha: 1),
+                dirtHi: NSColor(white: 0.38, alpha: 1),
+                stone: NSColor(white: 0.44, alpha: 1),
+                stoneMark: NSColor(white: 0.30, alpha: 1),
+                lip: NSColor(white: 0.40, alpha: 1),
+                vein: NSColor(white: 0.86, alpha: 0.88)
+            )
+        }
+        return ShaftTone(
+            well: NSColor(white: 0.80, alpha: 1),
+            dirtLo: NSColor(white: 0.58, alpha: 1),
+            dirtMid: NSColor(white: 0.66, alpha: 1),
+            dirtHi: NSColor(white: 0.72, alpha: 1),
+            stone: NSColor(white: 0.50, alpha: 1),
+            stoneMark: NSColor(white: 0.40, alpha: 1),
+            lip: NSColor(white: 0.52, alpha: 1),
+            vein: NSColor(white: 0.22, alpha: 0.88)
+        )
+    }
+}
+
 final class Companion {
     static let shared = Companion()
 
@@ -59,6 +101,9 @@ final class Companion {
     private var bobKick: CGFloat = 0
     static let craterDepth: CGFloat = 14
     static let tile: CGFloat = 5
+    /// README / share shots sit on a dark card even when the key palette
+    /// is light — force the dark-HUD shaft so the miner is not on beige.
+    static var exportShot = false
     var shaftTarget: NSPoint = .zero
     var onFrame: (() -> Void)?
 
@@ -303,6 +348,13 @@ final class Companion {
 
     private func drawShaft(in shaft: NSRect, ink: NSColor) {
         NSGraphicsContext.current?.shouldAntialias = false
+        let tone = ShaftTone.make(ink)
+        // Light well first — the crater is a hole, and a dark sprite on the
+        // dark card / HUD disappears. Dirt tiles then cover everything but
+        // the pit, so the miner stands in dust, not in a black gap.
+        tone.well.setFill()
+        shaft.fill()
+
         let tile = Companion.tile
         let feetY = shaftTarget.y
         let floorY = shaft.minY
@@ -324,12 +376,11 @@ final class Companion {
                     continue
                 }
                 let kind = Self.block(tx, ty - scroll)
-                Self.fillBlock(cell, kind: kind, ink: ink)
+                Self.fillBlock(cell, kind: kind, tone: tone)
             }
         }
 
-        // Crater lip — packed dirt under the drill.
-        ink.withAlphaComponent(0.42).setFill()
+        tone.lip.setFill()
         let lipW: CGFloat = holeHalf * 2 - 4
         NSRect(x: floor(shaft.midX - lipW / 2), y: floor(floorY), width: ceil(lipW), height: 2).fill()
         NSRect(x: floor(shaft.midX - 5), y: floor(floorY + 2), width: 10, height: 1).fill()
@@ -341,8 +392,7 @@ final class Companion {
             if !shaft.contains(mid) { continue }
             if Self.inPit(mid.x, mid.y, midX: shaft.midX, floorY: floorY,
                           feetY: feetY, holeHalf: holeHalf) { continue }
-            LCDFont.draw(v.ch, at: mid, pixel: 1, color: ink.withAlphaComponent(0.62),
-                         angle: v.angle)
+            LCDFont.draw(v.ch, at: mid, pixel: 1, color: tone.vein, angle: v.angle)
         }
     }
 
@@ -363,28 +413,27 @@ final class Companion {
         return (x >> 16) & 7
     }
 
-    private static func fillBlock(_ cell: NSRect, kind: Int, ink: NSColor) {
+    private static func fillBlock(_ cell: NSRect, kind: Int, tone: ShaftTone) {
         let r = NSRect(x: floor(cell.minX), y: floor(cell.minY),
                        width: ceil(cell.width), height: ceil(cell.height))
         switch kind {
         case 6, 7:
-            // Stone / cobble
-            ink.withAlphaComponent(0.48).setFill()
+            tone.stone.setFill()
             r.fill()
-            ink.withAlphaComponent(0.22).setFill()
+            tone.stoneMark.setFill()
             NSRect(x: r.minX, y: r.minY, width: 2, height: 2).fill()
             NSRect(x: r.maxX - 2, y: r.maxY - 2, width: 2, height: 1).fill()
         case 0, 1:
-            ink.withAlphaComponent(0.16).setFill()
+            tone.dirtLo.setFill()
             r.fill()
         case 2, 3:
-            ink.withAlphaComponent(0.26).setFill()
+            tone.dirtMid.setFill()
             r.fill()
         default:
-            ink.withAlphaComponent(0.34).setFill()
+            tone.dirtHi.setFill()
             r.fill()
             if kind == 5 {
-                ink.withAlphaComponent(0.18).setFill()
+                tone.stoneMark.setFill()
                 NSRect(x: r.minX + 1, y: r.minY + 1, width: 2, height: 2).fill()
             }
         }

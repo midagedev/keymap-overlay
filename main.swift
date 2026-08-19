@@ -630,6 +630,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.load()
         let demo = ProcessInfo.processInfo.arguments.contains("--demo")
         if demo { stats.seedDemo() }
+        Companion.exportShot = true
+        defer { Companion.exportShot = false }
         let kb = KeyboardView(frame: NSRect(x: 0, y: 0, width: kbSize.width, height: kbSize.height))
         kb.store = store
         Companion.shared.layout(in: kb.shaftRect())
