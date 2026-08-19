@@ -1,0 +1,11 @@
+{
+  "id": "charybdis-4x6",
+  "name": "Charybdis 4x6",
+  "gridRows": 4,
+  "gridCols": 12,
+  "splitGapCols": 3,
+  "thumbRowA": [48, 49, 50, 51, 52],
+  "thumbRowB": [53, 54, 55],
+  "thumbRowBPositions": [0, 1, 3],
+  "notes": "Five thumb keys span B..N columns on the grid; row B staggers half a key and skips position 2."
+}
