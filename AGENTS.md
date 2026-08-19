@@ -15,40 +15,58 @@ open build/KeymapOverlay.app
 - `build.sh` signs with the local Apple Development identity when present —
   this is important: ad-hoc signing invalidates the Accessibility TCC grant
   on every rebuild.
-- No tests yet. Verify parser changes with the pattern used during
-  development: compile `ZMKKeymap.swift` with a small `@main` harness
-  (`swiftc -parse-as-library`) and print the parsed layers against
+- Asset export (README images, keymap sharing): run the binary directly with
+  `--export-assets <dir>`; add `--demo` to seed realistic stats. This runs
+  before `NSApplication.run()` (top-level early-exit in main.swift) — do not
+  move it into `applicationDidFinishLaunching` (it hung there; see history).
+- No unit tests. Verify parser changes with the harnesses preserved under
+  `local/harnesses/` (gitignored): `swiftc -parse-as-library` a small `@main`
+  file together with `ZMKKeymap.swift` and print parsed layers/combos against
   `../zmk-config-charybdis/config/charybdis.keymap`.
 
 ## Architecture
 
-- `main.swift` — app shell: overlay panel (NSPanel, floating, click-through
-  keyboard area), stats panel, CGEventTap for key/mouse/scroll highlight,
+- `main.swift` — app shell: overlay panel (floating NSPanel, click-through
+  keyboard view), stats panel, CGEventTap for key/mouse/scroll highlight,
   Carbon hotkeys (⌘⌃K overlay, ⌘⌃S stats), status probing via
-  `system_profiler`.
+  `system_profiler`, benchmark-derived features (auto-hide, learning mode,
+  shift-reactive labels, combo dots).
 - `ZMKKeymap.swift` — pragmatic string-scanning parser for ZMK `.keymap`
-  devicetree. Produces `[KeymapLayer]` of 56 `KeyCell`s (main label, sub
-  label, macOS virtual keycode, mouse button, dim/accent flags).
-- `StatsEngine.swift` — usage recording + JSON persistence under
-  `~/Library/Application Support/KeymapOverlay/stats.json`.
+  devicetree. Entry points: `parse()` (layers only) and `parseDoc()`
+  (layers + combos as `KeymapDoc`). Produces 56 `KeyCell`s per layer
+  (main label, sub label, macOS virtual keycode, mouse button, flags).
+- `StatsEngine.swift` — usage recording (WPM, per-key, finger load, layer
+  time), JSON persistence under `~/Library/Application Support/KeymapOverlay/`,
+  `seedDemo()` for export-only realistic data (never persisted).
 - `presets/*.json` — physical geometry (which flat indices are thumbs).
 
 ### Gotchas learned the hard way
 
-- **CGEventTapCallBack is a C function pointer** — it cannot capture locals.
-  Use `userInfo`/globals (see `stats` global and `view.sentinels`).
+- **CGEventTapCallBack is a C function pointer** — no captures. Use
+  `userInfo` + globals (see `stats` global, `view.sentinels`).
 - **macOS virtual keycodes ≠ HID usage IDs.** F16=106, F17=64, F18=79
-  (from HIToolbox Events.h). F13/F14 are brightness keys on macOS.
-- Keymap cell ordering matches the ZMK bindings array order: 48 grid keys,
-  then thumb row A (5), then thumb row B (3) — positions come from the
-  preset JSON, not the firmware.
-- The parser's `labelBefore` finds the identifier *before* the colon of a
-  devicetree node; behavior `bindings` refs arrive wrapped in `<>` and may
-  be comma-separated across lines.
-- Layer-hold sentinels: layer keys must use macros that hold F16/F17/F18
-  while active (see reference keymap); the app detects keycodes 106/64/79.
-- `store.load()` must run *after* the panel exists — `rebuildUI()` is the
-  reload handler and dereferences the panel.
+  (HIToolbox Events.h). F13/F14 are brightness keys on macOS — never use
+  as layer sentinels.
+- **Accessibility TCC flakiness**: after rebuilds the dot may stay red
+  (tap dead). Fix: System Settings → Accessibility → remove ALL
+  KeymapOverlay entries, re-add once. Dev-certificate signing should make
+  this a one-time thing; if it recurs check `codesign -dvv` TeamIdentifier.
+- **Status flicker**: never compose the status line from a slow probe in
+  the fast timer. `refreshStatusFast()` uses `cachedStatus`; only
+  `probeStatusSlow()` (45s, background) touches `system_profiler`.
+- **Battery parsing**: scope the device block by *indentation* (not blank
+  lines / colons) and collect every `Battery Level:` entry — the split
+  central proxies the peripheral battery, so there can be two.
+- Parser gotchas: hold-tap `bindings` refs come wrapped in `<>` and
+  comma-separated across lines (`<&l1_signal>, <&kp>`); devicetree node
+  labels sit *before* the colon; `&mo` may be followed by a space before
+  the layer number; combo labels need `<&`/`&`/`=` token filtering.
+- `store.load()` must run after the panel exists (`rebuildUI()` is the
+  reload handler and dereferences the panel).
+- Saved panel position can land off-screen after monitor layout changes —
+  `defaults delete com.midagedev.KeymapOverlay panelOrigin` resets it.
+- `NSImage(bitmapImageRep:)` does not exist in Swift 5 on this toolchain;
+  use `NSImage(cgImage: rep.cgImage!, size:)`.
 
 ## Conventions
 
@@ -56,3 +74,15 @@ open build/KeymapOverlay.app
 - Keep the parser subset-focused; full devicetree is out of scope by design.
 - When the firmware keymap changes, this app needs no changes — that is the
   product's core promise. Only preset geometry is app-side data.
+- `local/` is gitignored machine scratch (harnesses, debug notes). Keep it
+  that way; anything generally useful gets promoted into this file or tests.
+
+## Competitors / positioning (2026-08 survey)
+
+- srwi/keypeek (★177, Tauri): live overlay, needs a firmware module; reads
+  layout from device via raw HID + ZMK Studio.
+- caksoylar/keymap-drawer (★1314): static SVG diagrams, YAML-based.
+- conventoangelo/OverKeys (★235, Flutter/Win): layout practice visualizer —
+  source of our auto-hide / learning mode / shift-label ideas.
+- Our niche: parses the firmware `.keymap` directly (no export steps, live
+  file-watch), macOS-native, typing statistics included.
