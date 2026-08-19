@@ -1,14 +1,15 @@
 # AGENTS.md
 
-KeymapOverlay is a single-binary AppKit app (macOS 12+) that renders a ZMK
-keyboard's keymap and live typing state. Companion repo:
+Vein (display name; bundle id still `com.midagedev.KeymapOverlay`) is a
+single-binary AppKit app (macOS 12+) that renders a ZMK keyboard's keymap
+and live typing state, with a 1-bit miner in the split gap. Companion repo:
 `midagedev/zmk-config-charybdis` (the firmware config whose `.keymap` is the
 default data source on this machine).
 
 ## Build / run
 
 ```bash
-./build.sh                 # swiftc -O all *.swift -> build/KeymapOverlay.app
+./build.sh                 # swiftc -O all *.swift -> build/KeymapOverlay.app (display name: Vein)
 open build/KeymapOverlay.app
 ```
 
@@ -27,17 +28,21 @@ open build/KeymapOverlay.app
 ## Architecture
 
 - `main.swift` — app shell: overlay panel (floating NSPanel, click-through
-  keyboard view), stats panel, CGEventTap for key/mouse/scroll highlight,
-  Carbon hotkeys (⌘⌃K overlay, ⌘⌃S stats), status probing via
-  `system_profiler`, benchmark-derived features (auto-hide, learning mode,
-  shift-reactive labels, combo dots).
+  keyboard view), stats panel, menu-bar status item, CGEventTap for
+  key/mouse/scroll highlight, Carbon hotkeys (⌘⌃K overlay, ⌘⌃S stats),
+  status probing via `system_profiler`, benchmark-derived features
+  (auto-hide, learning mode, shift-reactive labels, combo dots).
+- `Companion.swift` — 3-tone miner in the split gap, dirt tiles, letter
+  veins, motes. Dig is keyed to keystrokes (not a free-running loop).
+- `StatsHUD.swift` — stats panel + sparkline view (60s / hour / 7-day).
 - `ZMKKeymap.swift` — pragmatic string-scanning parser for ZMK `.keymap`
   devicetree. Entry points: `parse()` (layers only) and `parseDoc()`
   (layers + combos as `KeymapDoc`). Produces 56 `KeyCell`s per layer
   (main label, sub label, macOS virtual keycode, mouse button, flags).
 - `StatsEngine.swift` — usage recording (WPM, per-key, finger load, layer
-  time), JSON persistence under `~/Library/Application Support/KeymapOverlay/`,
-  `seedDemo()` for export-only realistic data (never persisted).
+  time, level/streak/combo), JSON persistence under
+  `~/Library/Application Support/KeymapOverlay/`, `seedDemo()` for
+  export-only realistic data (never persisted).
 - `presets/*.json` — physical geometry (which flat indices are thumbs).
 
 ### Gotchas learned the hard way
@@ -49,7 +54,7 @@ open build/KeymapOverlay.app
   as layer sentinels.
 - **Accessibility TCC flakiness**: after rebuilds the dot may stay red
   (tap dead). Fix: System Settings → Accessibility → remove ALL
-  KeymapOverlay entries, re-add once. Dev-certificate signing should make
+  Vein / KeymapOverlay entries, re-add once. Dev-certificate signing should make
   this a one-time thing; if it recurs check `codesign -dvv` TeamIdentifier.
 - **Status flicker**: never compose the status line from a slow probe in
   the fast timer. `refreshStatusFast()` uses `cachedStatus`; only

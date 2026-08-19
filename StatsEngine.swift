@@ -10,6 +10,30 @@ final class StatsEngine {
         var clicks = 0
         var scrolls = 0
         var layerSeconds: [Int: Int] = [:]
+        var hourKeys: [Int] = Array(repeating: 0, count: 24)
+
+        enum CodingKeys: String, CodingKey {
+            case keys, clicks, scrolls, layerSeconds, hourKeys
+        }
+
+        init(keys: Int = 0, clicks: Int = 0, scrolls: Int = 0,
+             layerSeconds: [Int: Int] = [:], hourKeys: [Int] = Array(repeating: 0, count: 24)) {
+            self.keys = keys
+            self.clicks = clicks
+            self.scrolls = scrolls
+            self.layerSeconds = layerSeconds
+            self.hourKeys = hourKeys
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            keys = try c.decodeIfPresent(Int.self, forKey: .keys) ?? 0
+            clicks = try c.decodeIfPresent(Int.self, forKey: .clicks) ?? 0
+            scrolls = try c.decodeIfPresent(Int.self, forKey: .scrolls) ?? 0
+            layerSeconds = try c.decodeIfPresent([Int: Int].self, forKey: .layerSeconds) ?? [:]
+            let h = try c.decodeIfPresent([Int].self, forKey: .hourKeys) ?? []
+            hourKeys = (0..<24).map { $0 < h.count ? h[$0] : 0 }
+        }
     }
 
     private(set) var days: [String: DayStats] = [:]
@@ -55,11 +79,35 @@ final class StatsEngine {
         return f.string(from: Date())
     }
 
+    private var lastComboAt: Date?
+    private(set) var combo = 0
+    private(set) var maxComboToday = 0
+    private(set) var sessionPeakWPM = 0
+
     func recordKey(code: Int) {
-        today.keys += 1
+        var d = today
+        d.keys += 1
+        let hour = Calendar.current.component(.hour, from: Date())
+        if d.hourKeys.count != 24 { d.hourKeys = Array(repeating: 0, count: 24) }
+        d.hourKeys[hour] += 1
+        today = d
         keyCounts[code, default: 0] += 1
-        recentKeys.append(Date())
+        let now = Date()
+        recentKeys.append(now)
+        if let last = lastComboAt, now.timeIntervalSince(last) < 0.38 {
+            combo += 1
+        } else {
+            combo = 1
+        }
+        lastComboAt = now
+        if combo > maxComboToday { maxComboToday = combo }
         pruneRecent()
+    }
+
+    /// Combo decays after a short pause so the HUD can hide the counter.
+    var liveCombo: Int {
+        guard let last = lastComboAt, Date().timeIntervalSince(last) < 0.48 else { return 0 }
+        return combo
     }
 
     func recordClick() { today.clicks += 1 }
@@ -86,6 +134,9 @@ final class StatsEngine {
         days.removeAll()
         keyCounts.removeAll()
         recentKeys.removeAll()
+        combo = 0
+        maxComboToday = 48
+        sessionPeakWPM = 92
 
         // QWERTY-plausible frequency profile (macOS virtual keycodes).
         let demo: [(Int, Int)] = [
@@ -110,11 +161,18 @@ final class StatsEngine {
             ds.clicks = keys / 18
             ds.scrolls = keys / 9
             ds.layerSeconds = [0: 7 * 3600 + 240, 1: 1500, 2: 2600, 3: 420]
+            ds.hourKeys = Self.demoHours(keys)
             days[f.string(from: d)] = ds
         }
 
         let now = Date()
-        for i in 0..<330 { recentKeys.append(now - Double.random(in: 0...60)) }
+        for _ in 0..<330 { recentKeys.append(now - Double.random(in: 0...60)) }
+    }
+
+    private static func demoHours(_ total: Int) -> [Int] {
+        let w = [0, 0, 0, 0, 0, 0, 1, 3, 8, 10, 9, 8, 7, 9, 11, 12, 10, 8, 6, 4, 2, 1, 0, 0]
+        let s = max(w.reduce(0, +), 1)
+        return w.map { $0 * total / s }
     }
 
     // MARK: - Queries
@@ -123,7 +181,76 @@ final class StatsEngine {
     var wpm: Int {
         let cutoff = Date().addingTimeInterval(-60)
         recentKeys.removeAll { $0 < cutoff }
-        return recentKeys.count / 5
+        let value = recentKeys.count / 5
+        if value > sessionPeakWPM { sessionPeakWPM = value }
+        return value
+    }
+
+    static let levelTitles = [
+        "견습", "채굴", "갱도", "광맥", "숙련",
+        "베테랑", "마스터", "카리브디스", "베인",
+    ]
+
+    func levelInfo() -> LevelInfo {
+        let xp = max(totalKeys, 0)
+        var level = 0
+        var consumed = 0
+        while level < 99 {
+            let need = 200 * (level + 1)
+            if xp < consumed + need {
+                let title = level < Self.levelTitles.count ? Self.levelTitles[level] : "베인"
+                return LevelInfo(level: level, title: title, xpInto: xp - consumed, xpNeed: need)
+            }
+            consumed += need
+            level += 1
+        }
+        return LevelInfo(level: 99, title: "베인", xpInto: 1, xpNeed: 1)
+    }
+
+    /// Per-second key intensity, oldest first. Values 0...1.
+    func rateSpark(_ seconds: Int = 60) -> [CGFloat] {
+        var bins = Array(repeating: 0, count: seconds)
+        let now = Date()
+        for t in recentKeys {
+            let ago = Int(now.timeIntervalSince(t))
+            if ago >= 0 && ago < seconds { bins[seconds - 1 - ago] += 1 }
+        }
+        let peak = max(bins.max() ?? 1, 1)
+        return bins.map { CGFloat($0) / CGFloat(peak) }
+    }
+
+    /// Today's keys by hour, 0...1.
+    func hourSpark() -> [CGFloat] {
+        var h = today.hourKeys
+        if h.count != 24 { h = Array(repeating: 0, count: 24) }
+        let peak = max(h.max() ?? 1, 1)
+        return h.map { CGFloat($0) / CGFloat(peak) }
+    }
+
+    /// Last 7 days, 0...1.
+    func weekSpark() -> [CGFloat] {
+        let vals = recentDays(7).map(\.keys)
+        let peak = max(vals.max() ?? 1, 1)
+        return vals.map { CGFloat($0) / CGFloat(peak) }
+    }
+
+    /// Consecutive days with at least 50 keys. Today with a thin count
+    /// still keeps yesterday's streak alive until the day is over.
+    var streak: Int {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let cal = Calendar.current
+        var offset = 0
+        if (days[f.string(from: Date())]?.keys ?? 0) < 50 { offset = 1 }
+        var count = 0
+        var i = offset
+        while i < 400 {
+            let d = cal.date(byAdding: .day, value: -i, to: Date())!
+            if (days[f.string(from: d)]?.keys ?? 0) < 50 { break }
+            count += 1
+            i += 1
+        }
+        return count
     }
 
     var todayKeys: Int { today.keys }
@@ -147,7 +274,7 @@ final class StatsEngine {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
         let cal = Calendar.current
-        return (0..<(n - 1)).reversed().compactMap { back in
+        return (0..<n).reversed().compactMap { back in
             let d = cal.date(byAdding: .day, value: -back, to: Date())!
             let key = f.string(from: d)
             return (key, days[key]?.keys ?? 0)

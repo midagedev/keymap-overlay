@@ -2,10 +2,10 @@ import Cocoa
 import Carbon.HIToolbox
 import ApplicationServices
 
-// KeymapOverlay: a macOS companion overlay for ZMK keyboards.
+// Vein: a macOS companion overlay for ZMK keyboards.
 // Renders the physical layout and live key/layer state from the firmware's
 // own `.keymap` file (see ZMKKeymap.swift), records usage statistics
-// (StatsEngine.swift), and highlights keys as they are pressed.
+// (StatsEngine.swift), and runs a 1-bit miner in the split while you type.
 
 let U: CGFloat = 30
 let S: CGFloat = 27
@@ -49,6 +49,7 @@ struct Palette {
     let accent: NSColor
     let held: NSColor
     let heldText: NSColor
+    let bevel: NSColor
 
     static func current() -> Palette {
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -57,17 +58,19 @@ struct Palette {
                            keyFillDim: NSColor(white: 0.10, alpha: 1),
                            text: .white,
                            textSub: NSColor.white.withAlphaComponent(0.55),
-                           accent: NSColor(calibratedRed: 0.35, green: 0.78, blue: 1.0, alpha: 1),
-                           held: NSColor.systemYellow.withAlphaComponent(0.9),
-                           heldText: .black)
+                           accent: NSColor(white: 0.78, alpha: 1),
+                           held: NSColor(white: 0.82, alpha: 0.95),
+                           heldText: .black,
+                           bevel: NSColor.white.withAlphaComponent(0.08))
         }
         return Palette(keyFill: NSColor(white: 1.0, alpha: 1),
                        keyFillDim: NSColor(white: 0.87, alpha: 1),
                        text: .black,
                        textSub: NSColor.black.withAlphaComponent(0.55),
-                       accent: NSColor.systemBlue,
-                       held: NSColor.systemYellow,
-                       heldText: .black)
+                       accent: NSColor(white: 0.25, alpha: 1),
+                       held: NSColor(white: 0.78, alpha: 1),
+                       heldText: .black,
+                       bevel: NSColor.white.withAlphaComponent(0.40))
     }
 }
 
@@ -159,6 +162,10 @@ final class KeyboardView: NSView {
     var autoSwitch = true
     var lastFn = 1
     var layerHold = 0
+    var lastFlags: CGEventFlags = []
+    /// Last time a layer sentinel went down. Discrete (trackball) scroll
+    /// may keep Nav up briefly; trackpad pixel-scroll never should.
+    var lastLayerEngage = Date.distantPast
 
     /// Auto-hide: seconds since last key activity; the panel fades out
     /// after the threshold (mirrors OverKeys' behavior).
@@ -168,20 +175,19 @@ final class KeyboardView: NSView {
 
     func noteActivity() {
         lastActivity = Date()
-        if alphaValue < 1 {
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.2
-                self.animator().alphaValue = 1
-            })
-        }
+        guard let panel, panel.alphaValue < 0.99 else { return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.2
+            panel.animator().alphaValue = 1
+        })
     }
 
     func fadeOutIfIdle() {
-        guard autoHideEnabled, panel?.isVisible == true else { return }
-        if Date().timeIntervalSince(lastActivity) > Double(autoHideSeconds), alphaValue == 1 {
+        guard autoHideEnabled, let panel, panel.isVisible else { return }
+        if Date().timeIntervalSince(lastActivity) > Double(autoHideSeconds), panel.alphaValue > 0.99 {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.6
-                self.animator().alphaValue = 0.12
+                panel.animator().alphaValue = 0.12
             })
         }
     }
@@ -296,8 +302,62 @@ final class KeyboardView: NSView {
         return NSColor(calibratedRed: 0.55 + 0.45 * t, green: 0.85 * (1 - t) + 0.1, blue: 0.2, alpha: 0.35 + 0.4 * t)
     }
 
+    func shaftRect() -> NSRect {
+        let left = xFor(5) + S + 6
+        let right = xFor(6) - 6
+        // Sit on the bottom letter row — never drop into the thumb cluster.
+        let floorY = 2 * U + 4
+        let top = contentHeight - 8
+        return NSRect(x: left, y: floorY, width: max(8, right - left), height: max(8, top - floorY))
+    }
+
+    func emitGlyph(code: Int) {
+        Companion.shared.layout(in: shaftRect())
+        // Layer sentinels only flip the map — digging starts when a real
+        // key is pressed while that layer is already held.
+        if sentinels[code] != nil { return }
+        let token: String
+        if let (_, kd) = cells().first(where: { $0.1.code == code }) {
+            token = Self.token(for: kd, code: code, label: displayLabel(kd))
+        } else {
+            token = "·"
+        }
+        if layerHold != 0 || layerIndex != 0 {
+            Companion.shared.strike(.layer, token: token)
+        } else {
+            Companion.shared.strike(.tap, token: token)
+        }
+    }
+
+    func strikeHomeRow() {
+        Companion.shared.layout(in: shaftRect())
+        Companion.shared.strike(.hrm, token: "M")
+    }
+
+    private static let dedicatedMods: Set<Int> = [54, 55, 56, 58, 59, 60, 61, 62]
+
+    func noteFlags(_ flags: CGEventFlags) {
+        let newly = (flags.contains(.maskAlternate) && !lastFlags.contains(.maskAlternate))
+            || (flags.contains(.maskControl) && !lastFlags.contains(.maskControl))
+            || (flags.contains(.maskCommand) && !lastFlags.contains(.maskCommand))
+            || (flags.contains(.maskShift) && !lastFlags.contains(.maskShift))
+        lastFlags = flags
+        let dedicatedHeld = !heldCodes.isDisjoint(with: Self.dedicatedMods)
+        if newly && !dedicatedHeld {
+            strikeHomeRow()
+        }
+    }
+
+    private static func token(for kd: KeyCell, code: Int, label: String) -> String {
+        if label.count == 1 { return label }
+        if code == 49 { return "·" }
+        if let c = label.first, c.isASCII && (c.isLetter || c.isNumber) { return String(c) }
+        return "·"
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let p = Palette.current()
+        Companion.shared.drawScene(in: shaftRect(), ink: p.text)
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         let allCells = cells()
@@ -310,6 +370,15 @@ final class KeyboardView: NSView {
                 heatmapFill(base: kd.dim ? p.keyFillDim : p.keyFill, code: kd.code).setFill()
             }
             path.fill()
+            if held, kd.sub != nil {
+                p.accent.setStroke()
+                path.lineWidth = 2
+                path.stroke()
+            } else if !held {
+                p.bevel.setStroke()
+                path.lineWidth = 0.8
+                path.stroke()
+            }
             if learningMode {
                 // Column tinted by the finger that should press it.
                 let col = Int(round((rect.minX - 2 - (rect.minX > xFor(6) - U / 2 ? GAP : 0)) / U))
@@ -370,6 +439,7 @@ final class KeyboardView: NSView {
                     .draw(at: NSPoint(x: first.x + 6, y: first.y + 4))
             }
         }
+        Companion.shared.drawMotes(ink: p.text.withAlphaComponent(0.80))
     }
 }
 
@@ -437,17 +507,20 @@ struct SystemStatus {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panel: NSPanel!
     var statsPanel: NSPanel!
-    var statsText: NSTextField!
+    var statsHUD: StatsHUD!
     var kbView: KeyboardView!
     var statusDot: NSView!
     var statusLabel: NSTextField!
     var layerButtons: [NSButton] = []
-    var heatButton: NSButton!
+
     var tap: CFMachPort?
     var axTimer: Timer?
     var hotKeyRef: EventHotKeyRef?
     var statsHotKeyRef: EventHotKeyRef?
     var autoButton: NSButton?
+    var liveSpark: SparklineView?
+    var statusItem: NSStatusItem?
+    var statusMenu: NSMenu!
     let store = KeymapStore()
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -483,6 +556,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         kbView.sentinels = store.sentinels
         kbView.combos = store.combos
         kbView.panel = panel
+        installStatusItem()
+        Companion.shared.onFrame = { [weak self] in
+            self?.kbView?.needsDisplay = true
+            self?.liveSpark?.values = stats.rateSpark(60)
+            self?.statusItem?.button?.image = Companion.shared.menuImage()
+        }
         installHotkeys()
         tryInstallTap()
         axTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
@@ -509,10 +588,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         stats.save()
     }
 
-    /// Renders each layer to PNG plus an animated GIF cycling through them.
-    /// Used for README assets and for sharing one's keymap as an image.
-    /// Pass --demo in the arguments to seed realistic stats first so the
-    /// exported images show a lived-in keyboard (heatmap, WPM, counts).
+    /// Renders README / share images offscreen. `--demo` seeds stats and
+    /// a lived-in miner (letters in the dirt, dig pose).
     func exportAssets(to dirPath: String) {
         let dir = URL(fileURLWithPath: dirPath)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -521,61 +598,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if demo { stats.seedDemo() }
         let kb = KeyboardView(frame: NSRect(x: 0, y: 0, width: kbSize.width, height: kbSize.height))
         kb.store = store
+        Companion.shared.layout(in: kb.shaftRect())
+        if demo {
+            Companion.shared.poseForExport(frame: 2, letters: ["E", "T", "A", "N", "O", "S", "R", "I"])
+        }
         let pad: CGFloat = 16
-        let size = NSSize(width: kbSize.width + pad * 2, height: kbSize.height + pad * 2 + 18)
+        let size = NSSize(width: kbSize.width + pad * 2, height: kbSize.height + pad * 2 + 28)
 
         var frames: [NSImage] = []
         for (i, layer) in store.layers.enumerated() {
             kb.layerIndex = i
-            guard let rep = renderLayer(kb, size: size, pad: pad, title: "\(store.preset.name) — \(layer.displayName)") else { continue }
-            if let png = rep.representation(using: .png, properties: [:]) {
-                let url = dir.appendingPathComponent("layer-\(i).png")
-                try? png.write(to: url)
-                print("wrote \(url.path)")
-            }
+            Companion.shared.poseForExport(frame: i)
+            guard let rep = renderLayer(kb, size: size, pad: pad, title: "Vein  ·  \(layer.displayName)") else { continue }
+            writePNG(rep, to: dir.appendingPathComponent("layer-\(i).png"))
             frames.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
         }
 
         if demo {
             kb.heatmap = true
             kb.layerIndex = 0
-            if let rep = renderLayer(kb, size: size, pad: pad,
-                                     title: "\(store.preset.name) — Heatmap 🔥") {
-                if let png = rep.representation(using: .png, properties: [:]) {
-                    let url = dir.appendingPathComponent("heatmap.png")
-                    try? png.write(to: url)
-                    print("wrote \(url.path)")
+            Companion.shared.poseForExport(frame: 1)
+            if let rep = renderLayer(kb, size: size, pad: pad, title: "Vein  ·  Heatmap") {
+                writePNG(rep, to: dir.appendingPathComponent("heatmap.png"))
+            }
+            kb.heatmap = false
+            if let rep = renderStatsHUD(size: NSSize(width: 360, height: 800)) {
+                writePNG(rep, to: dir.appendingPathComponent("stats.png"))
+            }
+            var mine: [NSImage] = []
+            let chips = ["E", "A", "T", "N", "O", "S", "H", "R"]
+            for i in 0..<8 {
+                Companion.shared.poseForExport(frame: i, letters: [chips[i]])
+                if let rep = renderLayer(kb, size: size, pad: pad, title: "Vein  ·  \(stats.wpm) WPM") {
+                    mine.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
                 }
             }
+            writeGIF(mine, delay: 0.11, to: dir.appendingPathComponent("vein.gif"))
         }
 
-        if demo, let rep = renderStatsPanel(size: NSSize(width: 480, height: 460)) {
-            if let png = rep.representation(using: .png, properties: [:]) {
-                let url = dir.appendingPathComponent("stats.png")
-                try? png.write(to: url)
-                print("wrote \(url.path)")
-            }
-        }
+        writeGIF(frames, delay: 0.9, to: dir.appendingPathComponent("layers.gif"))
+    }
 
+    private func writePNG(_ rep: NSBitmapImageRep, to url: URL) {
+        if let png = rep.representation(using: .png, properties: [:]) {
+            try? png.write(to: url)
+            print("wrote \(url.path)")
+        }
+    }
+
+    private func writeGIF(_ frames: [NSImage], delay: Double, to url: URL) {
         guard frames.count > 1 else { return }
         let gifData = NSMutableData()
-        if let dest = CGImageDestinationCreateWithData(gifData, "com.compuserve.gif" as CFString,
-                                                       frames.count, nil) {
-            let props = [kCGImagePropertyGIFDictionary as String:
-                            [kCGImagePropertyGIFLoopCount as String: 0]] as CFDictionary
-            CGImageDestinationSetProperties(dest, props)
-            for f in frames {
-                let frameProps = [kCGImagePropertyGIFDictionary as String:
-                                    [kCGImagePropertyGIFDelayTime as String: 0.9]] as CFDictionary
-                if let cg = f.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                    CGImageDestinationAddImage(dest, cg, frameProps)
-                }
+        guard let dest = CGImageDestinationCreateWithData(gifData, "com.compuserve.gif" as CFString,
+                                                          frames.count, nil) else { return }
+        let props = [kCGImagePropertyGIFDictionary as String:
+                        [kCGImagePropertyGIFLoopCount as String: 0]] as CFDictionary
+        CGImageDestinationSetProperties(dest, props)
+        for f in frames {
+            let frameProps = [kCGImagePropertyGIFDictionary as String:
+                                [kCGImagePropertyGIFDelayTime as String: delay]] as CFDictionary
+            if let cg = f.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                CGImageDestinationAddImage(dest, cg, frameProps)
             }
-            if CGImageDestinationFinalize(dest) {
-                let url = dir.appendingPathComponent("layers.gif")
-                try? (gifData as Data).write(to: url)
-                print("wrote \(url.path)")
-            }
+        }
+        if CGImageDestinationFinalize(dest) {
+            try? (gifData as Data).write(to: url)
+            print("wrote \(url.path)")
         }
     }
 
@@ -596,22 +684,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ]
         NSAttributedString(string: title, attributes: titleAttrs)
             .draw(at: NSPoint(x: pad, y: size.height - 14))
-        let status = "⚡ \(stats.wpm) WPM · 🔑 \(stats.todayKeys) · BT · 🔋 L 87% · R 74%"
+        let lv = stats.levelInfo()
+        let status = "\(stats.wpm) WPM · \(stats.todayKeys) · L\(lv.level) \(lv.title) · BT L87 R74"
         let statusAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 9.5, weight: .regular),
             .foregroundColor: NSColor.white.withAlphaComponent(0.55)
         ]
         NSAttributedString(string: status, attributes: statusAttrs)
             .draw(at: NSPoint(x: pad, y: 3))
+        NSGraphicsContext.saveGraphicsState()
+        let sparkShift = NSAffineTransform()
+        sparkShift.translateX(by: pad, yBy: 16)
+        sparkShift.concat()
+        let spark = SparklineView(frame: NSRect(x: 0, y: 0, width: size.width - pad * 2, height: 10))
+        spark.values = stats.rateSpark(60)
+        spark.draw(spark.bounds)
+        NSGraphicsContext.restoreGraphicsState()
         let ctx = NSGraphicsContext.current!.cgContext
-        ctx.translateBy(x: pad, y: pad + 6)
+        ctx.translateBy(x: pad, y: pad + 14)
         kb.frame = NSRect(origin: .zero, size: kbSize)
-        kb.draw(kb.bounds)
+        if let dark = NSAppearance(named: .darkAqua) {
+            dark.performAsCurrentDrawingAppearance { kb.draw(kb.bounds) }
+        } else {
+            kb.draw(kb.bounds)
+        }
         NSGraphicsContext.restoreGraphicsState()
         return rep
     }
 
-    private func renderStatsPanel(size: NSSize) -> NSBitmapImageRep? {
+    private func renderStatsHUD(size: NSSize) -> NSBitmapImageRep? {
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
                                          pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
                                          samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
@@ -622,19 +723,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         NSColor(white: 0.13, alpha: 1).setFill()
         NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 14, yRadius: 14).fill()
-        let heading = NSAttributedString(string: "통계", attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: .bold),
+        let lv = stats.levelInfo()
+        let heading = NSAttributedString(string: "Vein", attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .bold),
             .foregroundColor: NSColor.white
         ])
-        heading.draw(at: NSPoint(x: 16, y: size.height - 26))
+        heading.draw(at: NSPoint(x: 18, y: size.height - 28))
+        let hero = NSAttributedString(string: "L\(lv.level) \(lv.title)  ·  \(stats.wpm) WPM  ·  오늘 \(stats.todayKeys)키",
+                                      attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.75)
+        ])
+        hero.draw(at: NSPoint(x: 18, y: size.height - 46))
+
+        func spark(_ title: String, y: CGFloat, h: CGFloat, values: [CGFloat]) {
+            NSAttributedString(string: title, attributes: [
+                .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.4)
+            ]).draw(at: NSPoint(x: 18, y: y + h + 2))
+            NSGraphicsContext.saveGraphicsState()
+            let t = NSAffineTransform()
+            t.translateX(by: 18, yBy: y)
+            t.concat()
+            let v = SparklineView(frame: NSRect(x: 0, y: 0, width: size.width - 36, height: h))
+            v.values = values
+            v.draw(v.bounds)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        spark("최근 60초", y: size.height - 92, h: 28, values: stats.rateSpark(60))
+        spark("오늘 시간대", y: size.height - 140, h: 22, values: stats.hourSpark())
+        spark("최근 7일", y: size.height - 182, h: 18, values: stats.weekSpark())
+
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 2
         let body = NSAttributedString(string: statsReport(), attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.85),
+            .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.82),
             .paragraphStyle: para
         ])
-        body.draw(in: NSRect(x: 16, y: 12, width: size.width - 32, height: size.height - 48))
+        body.draw(in: NSRect(x: 18, y: 14, width: size.width - 36, height: size.height - 210))
         NSGraphicsContext.restoreGraphicsState()
         return rep
     }
@@ -644,86 +771,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func rebuildUI() {
-        let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: kbView.frame.width + 20,
-                                                       height: kbView.frame.height + 62))
+        let kbW = kbView.contentWidth
+        let kbH = kbView.contentHeight
+        let pad: CGFloat = 6
+        let topH: CGFloat = 20
+        let sparkH: CGFloat = 14
+        let botH: CGFloat = 28
+        let winW = kbW + pad * 2
+        let winH = topH + kbH + sparkH + botH + pad * 2 + 4
+
+        let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: winW, height: winH))
         content.material = .hudWindow
         content.blendingMode = .behindWindow
         content.state = .active
         content.wantsLayer = true
-        content.layer?.cornerRadius = 12
+        content.layer?.cornerRadius = 10
 
         let title = NSStackView()
         title.orientation = .horizontal
-        title.spacing = 6
+        title.spacing = 3
         layerButtons = []
         for (i, layer) in store.layers.enumerated() {
             let b = NSButton(title: layer.displayName, target: self, action: #selector(pickLayer(_:)))
             b.tag = i
-            b.bezelStyle = .texturedRounded
+            b.bezelStyle = .inline
             b.controlSize = .mini
-            b.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+            b.font = NSFont.systemFont(ofSize: 9, weight: .medium)
             layerButtons.append(b)
             title.addArrangedSubview(b)
         }
         let autoButton = NSButton(checkboxWithTitle: "AUTO", target: self, action: #selector(toggleAuto(_:)))
         autoButton.controlSize = .mini
-        autoButton.font = NSFont.systemFont(ofSize: 9, weight: .medium)
-        autoButton.state = .on
+        autoButton.font = NSFont.systemFont(ofSize: 8, weight: .medium)
+        autoButton.state = kbView.autoSwitch ? .on : .off
         self.autoButton = autoButton
         title.addArrangedSubview(autoButton)
-        heatButton = NSButton(title: "🔥", target: self, action: #selector(toggleHeatmap(_:)))
-        let learnButton = NSButton(title: "🎓", target: self, action: #selector(toggleLearning(_:)))
-        learnButton.bezelStyle = .texturedRounded
-        learnButton.controlSize = .mini
-        title.addArrangedSubview(learnButton)
-        heatButton.bezelStyle = .texturedRounded
-        heatButton.controlSize = .mini
-        title.addArrangedSubview(heatButton)
-        let statsButton = NSButton(title: "📊", target: self, action: #selector(toggleStatsPanel(_:)))
-        statsButton.bezelStyle = .texturedRounded
-        statsButton.controlSize = .mini
-        title.addArrangedSubview(statsButton)
-        statusDot = NSView(frame: NSRect(x: 0, y: 0, width: 9, height: 9))
+        statusDot = NSView(frame: NSRect(x: 0, y: 0, width: 7, height: 7))
         statusDot.wantsLayer = true
         statusDot.layer?.backgroundColor = (tap != nil ? NSColor.systemGreen : NSColor.systemRed).cgColor
-        statusDot.layer?.cornerRadius = 4.5
+        statusDot.layer?.cornerRadius = 3.5
+        statusDot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            statusDot.widthAnchor.constraint(equalToConstant: 7),
+            statusDot.heightAnchor.constraint(equalToConstant: 7)
+        ])
         title.addArrangedSubview(statusDot)
-        let hint = NSTextField(labelWithString: "⌘⌃K")
-        hint.font = NSFont.systemFont(ofSize: 9)
-        hint.textColor = .secondaryLabelColor
-        title.addArrangedSubview(hint)
+
+        if liveSpark == nil { liveSpark = SparklineView() }
+        liveSpark!.lineHeight = sparkH
+        liveSpark!.values = stats.rateSpark(60)
 
         statusLabel = NSTextField(labelWithString: "")
-        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .regular)
+        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
         statusLabel.textColor = .secondaryLabelColor
+        statusLabel.maximumNumberOfLines = 2
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.preferredMaxLayoutWidth = kbW
+        if let cell = statusLabel.cell as? NSTextFieldCell {
+            cell.wraps = true
+            cell.usesSingleLineMode = false
+        }
 
+        kbView.frame = NSRect(x: 0, y: 0, width: kbW, height: kbH)
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 4
+        stack.spacing = 3
         stack.translatesAutoresizingMaskIntoConstraints = false
         title.translatesAutoresizingMaskIntoConstraints = false
         kbView.translatesAutoresizingMaskIntoConstraints = false
+        liveSpark!.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        [title, kbView, statusLabel].forEach { stack.addArrangedSubview($0) }
+        [title, kbView, liveSpark!, statusLabel].forEach { stack.addArrangedSubview($0) }
         content.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8)
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: pad),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -pad),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: pad),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -pad),
+            kbView.widthAnchor.constraint(equalToConstant: kbW),
+            kbView.heightAnchor.constraint(equalToConstant: kbH),
+            liveSpark!.widthAnchor.constraint(equalToConstant: kbW),
+            liveSpark!.heightAnchor.constraint(equalToConstant: sparkH),
+            statusLabel.widthAnchor.constraint(equalToConstant: kbW)
         ])
 
-        let oldFrame = panel.frame
+        let origin = panel.frame.origin
         panel.contentView = content
-        panel.setFrame(oldFrame, display: true)
+        panel.setFrame(NSRect(origin: origin, size: NSSize(width: winW, height: winH)), display: true)
         if kbView.layerIndex >= store.layers.count { kbView.layerIndex = 0 }
         styleLayerButtons()
         refreshStatusFast()
     }
 
     private func buildStatsPanel() {
-        let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 300, height: 420))
+        let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 340, height: 540))
         content.material = .hudWindow
         content.blendingMode = .behindWindow
         content.state = .active
@@ -732,7 +874,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let header = NSStackView()
         header.orientation = .horizontal
-        let title = NSTextField(labelWithString: "통계")
+        let title = NSTextField(labelWithString: "Vein")
         title.font = NSFont.systemFont(ofSize: 13, weight: .bold)
         header.addArrangedSubview(title)
         let spacer = NSView()
@@ -744,31 +886,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         close.controlSize = .mini
         header.addArrangedSubview(close)
 
-        statsText = NSTextField(labelWithString: "")
-        statsText.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        statsHUD = StatsHUD(frame: .zero)
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
+        stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         header.translatesAutoresizingMaskIntoConstraints = false
-        statsText.translatesAutoresizingMaskIntoConstraints = false
-        [header, statsText].forEach { stack.addArrangedSubview($0) }
+        statsHUD.translatesAutoresizingMaskIntoConstraints = false
+        [header, statsHUD].forEach { stack.addArrangedSubview($0) }
         content.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
-            spacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 60)
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+            spacer.widthAnchor.constraint(greaterThanOrEqualToConstant: 40),
+            statsHUD.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
 
         statsPanel = NSPanel(contentRect: content.frame,
                              styleMask: [.titled, .closable, .resizable, .nonactivatingPanel],
                              backing: .buffered, defer: false)
         statsPanel.contentView = content
-        statsPanel.title = "KeymapOverlay 통계"
+        statsPanel.title = "Vein"
         statsPanel.isFloatingPanel = true
         statsPanel.level = .floating
         statsPanel.isReleasedWhenClosed = false
@@ -792,22 +934,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         exit(0)
     }
 
-    @objc func toggleHeatmap(_ sender: NSButton) {
+    @objc func toggleHeatmap(_ sender: Any?) {
         kbView.heatmap.toggle()
         kbView.needsDisplay = true
     }
 
-    @objc func toggleLearning(_ sender: NSButton) {
+    @objc func toggleLearning(_ sender: Any?) {
         kbView.learningMode.toggle()
         kbView.needsDisplay = true
+    }
+
+    @objc func toggleAutoHide(_ sender: Any?) {
+        kbView.autoHideEnabled.toggle()
+        if !kbView.autoHideEnabled { kbView.noteActivity() }
     }
 
     @objc func pickLayer(_ sender: NSButton) {
         kbView.layerIndex = sender.tag
     }
 
-    @objc func toggleAuto(_ sender: NSButton) {
-        kbView.autoSwitch = sender.state == .on
+    @objc func toggleAuto(_ sender: Any?) {
+        if let b = sender as? NSButton {
+            kbView.autoSwitch = b.state == .on
+        } else {
+            kbView.autoSwitch.toggle()
+            autoButton?.state = kbView.autoSwitch ? .on : .off
+        }
     }
 
     @objc func layerChanged() {
@@ -818,7 +970,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let p = Palette.current()
         for b in layerButtons {
             let on = b.tag == kbView.layerIndex
-            b.contentTintColor = on ? NSColor.systemYellow : p.text
+            b.contentTintColor = on ? p.accent : p.text.withAlphaComponent(0.55)
             b.font = NSFont.systemFont(ofSize: 10, weight: on ? .bold : .medium)
         }
     }
@@ -831,6 +983,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() }
     }
 
+    private func installStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: 16)
+        item.button?.image = Companion.shared.menuImage()
+        item.button?.imagePosition = .imageOnly
+        item.button?.imageScaling = .scaleProportionallyDown
+        item.button?.target = self
+        item.button?.action = #selector(statusClicked(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        statusMenu = NSMenu()
+        statusItem = item
+    }
+
+    private func refreshStatusMenu() {
+        let menu = NSMenu()
+        let overlay = NSMenuItem(title: panel.isVisible ? "오버레이 숨기기" : "오버레이 보이기",
+                                 action: #selector(togglePanel), keyEquivalent: "k")
+        overlay.keyEquivalentModifierMask = [.command, .control]
+        overlay.target = self
+        menu.addItem(overlay)
+        let rec = NSMenuItem(title: "기록", action: #selector(toggleStatsPanel(_:)), keyEquivalent: "s")
+        rec.keyEquivalentModifierMask = [.command, .control]
+        rec.target = self
+        menu.addItem(rec)
+        menu.addItem(.separator())
+        menu.addItem(checkItem("AUTO 레이어", on: kbView.autoSwitch, action: #selector(toggleAuto(_:))))
+        menu.addItem(checkItem("히트맵", on: kbView.heatmap, action: #selector(toggleHeatmap(_:))))
+        menu.addItem(checkItem("학습 모드", on: kbView.learningMode, action: #selector(toggleLearning(_:))))
+        menu.addItem(checkItem("자동 숨김", on: kbView.autoHideEnabled, action: #selector(toggleAutoHide(_:))))
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        menu.addItem(quit)
+        statusMenu = menu
+    }
+
+    private func checkItem(_ title: String, on: Bool, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.state = on ? .on : .off
+        item.target = self
+        return item
+    }
+
+    @objc func statusClicked(_ sender: Any?) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            refreshStatusMenu()
+            statusMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: statusItem?.button)
+        } else {
+            togglePanel()
+        }
+    }
+
     private var cachedStatus = SystemStatus()
 
     /// Composes the status line from cached data only — runs every second and
@@ -838,8 +1041,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// what made the label flicker).
     private func refreshStatusFast() {
         let fileName = store.keymapURL?.lastPathComponent ?? (store.lastError ?? "키맵 없음")
-        statusLabel?.stringValue = "⚡ \(stats.wpm) WPM · 🔑 \(stats.todayKeys) · "
-            + "\(store.preset.name) · \(cachedStatus.transport) \(cachedStatus.batteryText) · \(fileName)"
+        let lv = stats.levelInfo()
+        var line1 = "\(stats.wpm) WPM · \(stats.todayKeys) · L\(lv.level) \(lv.title)"
+        if stats.liveCombo >= 6 { line1 += " · x\(stats.liveCombo)" }
+        if stats.streak > 1 { line1 += " · \(stats.streak)d" }
+        let bat = cachedStatus.batteries.joined(separator: "/")
+        var line2 = store.preset.name
+        if !cachedStatus.transport.isEmpty { line2 += " · \(cachedStatus.transport)" }
+        if !bat.isEmpty { line2 += " \(bat)" }
+        line2 += " · \(fileName)"
+        statusLabel?.stringValue = line1 + "\n" + line2
+        liveSpark?.values = stats.rateSpark(60)
+        let tip = "Vein  \(stats.wpm) WPM  L\(lv.level) \(lv.title)"
+        statusItem?.button?.toolTip = tip
     }
 
     private func probeStatusSlow() {
@@ -853,14 +1067,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func refreshStatsText() {
-        guard statsPanel.isVisible, let st = statsText else { return }
-        st.stringValue = statsReport()
+        guard statsPanel.isVisible else { return }
+        statsHUD?.refresh()
     }
 
     func statsReport() -> String {
         var lines: [String] = []
-        lines.append("오늘: \(stats.todayKeys)키 · 클릭 \(stats.todayClicks) · 스크롤 \(stats.todayScrolls)")
-        lines.append("현재 \(stats.wpm) WPM · 누적 \(stats.totalKeys)키")
+        let lv = stats.levelInfo()
+        lines.append("L\(lv.level) \(lv.title)  \(lv.xpInto)/\(lv.xpNeed)")
+        lines.append("오늘 \(stats.todayKeys)키 · 클릭 \(stats.todayClicks) · 스크롤 \(stats.todayScrolls)")
+        lines.append("\(stats.wpm) WPM · 최고 \(stats.sessionPeakWPM) · 누적 \(stats.totalKeys)")
+        if stats.streak > 0 { lines.append("연속 \(stats.streak)일") }
+        if stats.maxComboToday > 0 { lines.append("오늘 콤보 \(stats.maxComboToday)") }
         lines.append("")
         lines.append("— 최근 7일 —")
         let week = stats.recentDays(7)
@@ -951,10 +1169,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 case .keyDown, .keyUp:
                     if t == .keyDown {
                         view.heldCodes.insert(code)
-                        if !autorepeat { stats.recordKey(code: code) }
+                        if !autorepeat {
+                            stats.recordKey(code: code)
+                            view.emitGlyph(code: code)
+                        }
                         if let l = view.sentinels[code] {
                             view.layerHold = l
                             view.lastFn = l
+                            view.lastLayerEngage = Date()
                             if view.autoSwitch { view.layerIndex = l }
                         }
                         if view.autoSwitch && view.layerHold == 0 && view.sentinels[code] == nil {
@@ -969,12 +1191,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                     view.heldCtrl = event.flags.contains(.maskControl)
                     view.setShift(event.flags.contains(.maskShift))
+                    view.noteFlags(event.flags)
                 case .scrollWheel:
                     stats.recordScroll()
-                    if view.autoSwitch && view.layerIndex == 0 { view.layerIndex = view.lastFn }
+                    // Trackpad / Magic Mouse send continuous pixel scroll.
+                    // The Charybdis ball sends discrete wheel ticks, and only
+                    // while a layer is (or just was) held — don't open Nav
+                    // for a MacBook two-finger swipe.
+                    let continuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
+                    if !continuous, view.autoSwitch, view.layerIndex == 0,
+                       Date().timeIntervalSince(view.lastLayerEngage) < 1.2 {
+                        view.layerIndex = view.lastFn
+                    }
                 case .flagsChanged:
                     view.heldCtrl = event.flags.contains(.maskControl)
                     view.setShift(event.flags.contains(.maskShift))
+                    view.noteFlags(event.flags)
                 case .leftMouseDown, .leftMouseUp:
                     if t == .leftMouseDown {
                         view.heldMouse.insert(0)

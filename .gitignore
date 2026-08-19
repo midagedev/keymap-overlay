@@ -1,4 +1,5 @@
 build/
+.DS_Store
 
 # Preserved locally, not for git:
 # - local/  : machine-specific scratch (paths, experiments, debug harnesses)
