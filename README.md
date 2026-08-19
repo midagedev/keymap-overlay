@@ -2,7 +2,7 @@
 
 # Vein
 
-**A macOS overlay that reads your ZMK `.keymap` and lights up as you type.**
+**A macOS overlay for ZMK keyboards.** Reads your firmware `.keymap` and lights up as you type.
 
 A 3-tone miner lives in the split. Letters lodge in the dirt. Quiet enough for an office.
 
@@ -100,8 +100,8 @@ Toggle from the menu bar. Keys tint by all-time use.
 ## Getting started
 
 ```bash
-git clone https://github.com/midagedev/vein
-cd vein
+git clone https://github.com/midagedev/zmk-overlay
+cd zmk-overlay
 ./build.sh
 open build/KeymapOverlay.app
 ```
