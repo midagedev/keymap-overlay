@@ -1,10 +1,11 @@
 # AGENTS.md
 
-Vein (display name; bundle id still `com.midagedev.KeymapOverlay`) is a
-single-binary AppKit app (macOS 12+) that renders a ZMK keyboard's keymap
-and live typing state, with a 1-bit miner in the split gap. Companion repo:
-`midagedev/zmk-config-charybdis` (the firmware config whose `.keymap` is the
-default data source on this machine).
+Vein (GitHub `midagedev/vein`; display name Vein; bundle id still
+`com.midagedev.KeymapOverlay`) is a single-binary AppKit app (macOS 12+)
+that renders a ZMK keyboard's keymap and live typing state, with a 1-bit
+miner in the split gap. Companion repo: `midagedev/zmk-config-charybdis`
+(the firmware config whose `.keymap` is the default data source on this
+machine).
 
 ## Build / run
 

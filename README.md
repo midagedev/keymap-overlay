@@ -100,8 +100,8 @@ Toggle from the menu bar. Keys tint by all-time use.
 ## Getting started
 
 ```bash
-git clone https://github.com/midagedev/keymap-overlay
-cd keymap-overlay
+git clone https://github.com/midagedev/vein
+cd vein
 ./build.sh
 open build/KeymapOverlay.app
 ```
