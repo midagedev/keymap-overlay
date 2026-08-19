@@ -54,8 +54,10 @@ into readable labels (`A/⌥`, `🔒`, `↵/L2`).*
 
 `⌘⌃S` opens the stats panel:
 
+![Stats panel](assets/stats.png)
+
 - ⚡ live WPM and today's keystroke count
-- 📅 7-day typing history (ASCII bar chart)
+- 📅 7-day typing history
 - 🏆 most-used keys ranking
 - ✋ finger load distribution — spot an unbalanced layout before your
   hands do
@@ -66,16 +68,22 @@ Stats persist in `~/Library/Application Support/KeymapOverlay/`.
 ### Heatmap
 
 Toggle 🔥 and keys tint by all-time usage — see which keys earn their
-spot on your layout.
+spot on your layout:
+
+![Heatmap](assets/heatmap.png)
 
 ### Everything else
 
-- USB/Bluetooth connection status and battery readout
+- USB/Bluetooth connection status, with per-half battery
+  (`L 87% · R 74%` — reads every battery entry macOS exposes for the
+  device, including the split peripheral's proxied battery)
 - Dark/light mode aware, draggable, position remembered
 - `⌘⌃K` to hide/show
 - Share your keymap as an image:
   `KeymapOverlay.app --export-assets ~/Desktop` writes one PNG per layer
-  plus an animated GIF (the assets on this page were made this way)
+  plus an animated GIF. Add `--demo` to bake in realistic stats — the
+  images on this page were generated that way. No screen-recording
+  permission needed (views are rendered offscreen).
 
 ## Getting started
 

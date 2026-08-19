@@ -230,23 +230,44 @@ final class KeyboardView: NSView {
 
 struct SystemStatus {
     var transport: String = "연결 없음"
-    var battery: String?
+    var batteries: [String] = []
+
+    var batteryText: String {
+        switch batteries.count {
+        case 0: return ""
+        case 1: return "· 🔋 \(batteries[0])"
+        default: return "· 🔋 L \(batteries[0]) · R \(batteries[1])"
+        }
+    }
 
     static func probe() -> SystemStatus {
         var st = SystemStatus()
         if let out = run("/usr/sbin/system_profiler", ["SPBluetoothDataType"]) {
-            var inDevice = false
-            var battery: String?
-            for line in out.split(separator: "\n") {
+            // Scope the Charybdis block by indentation so every Battery
+            // Level line inside it is collected (central + proxied peripheral).
+            var inCharybdis = false
+            var baseIndent = Int.max
+            var batteries: [String] = []
+            for line in out.split(separator: "\n").map(String.init) {
+                if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
+                let indent = line.prefix { $0 == " " }.count
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.hasPrefix("Charybdis:") { inDevice = true; continue }
-                if trimmed.hasSuffix(":") { inDevice = false }
-                if inDevice, let r = trimmed.range(of: "Battery Level:") {
-                    battery = String(trimmed[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("Charybdis:") {
+                    inCharybdis = true
+                    baseIndent = indent
+                    continue
+                }
+                guard inCharybdis else { continue }
+                if indent <= baseIndent {
+                    inCharybdis = false
+                    continue
+                }
+                if let r = trimmed.range(of: "Battery Level:") {
+                    batteries.append(String(trimmed[r.upperBound...]).trimmingCharacters(in: .whitespaces))
                 }
             }
-            if battery != nil { st.transport = "BT" }
-            st.battery = battery
+            if !batteries.isEmpty { st.transport = "BT" }
+            st.batteries = batteries
         }
         if let out = run("/usr/sbin/system_profiler", ["SPUSBDataType"]),
            out.contains("ZMK") || out.contains("Charybdis") {
@@ -325,10 +346,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in stats.save() }
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.refreshStatus()
+            self?.refreshStatusFast()
             self?.refreshStatsText()
         }
-        refreshStatus()
+        Timer.scheduledTimer(withTimeInterval: 45, repeats: true) { [weak self] _ in
+            self?.probeStatusSlow()
+        }
+        refreshStatusFast()
+        probeStatusSlow()
         refreshStatsText()
     }
 
@@ -338,10 +363,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Renders each layer to PNG plus an animated GIF cycling through them.
     /// Used for README assets and for sharing one's keymap as an image.
+    /// Pass --demo in the arguments to seed realistic stats first so the
+    /// exported images show a lived-in keyboard (heatmap, WPM, counts).
     func exportAssets(to dirPath: String) {
         let dir = URL(fileURLWithPath: dirPath)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         store.load()
+        let demo = ProcessInfo.processInfo.arguments.contains("--demo")
+        if demo { stats.seedDemo() }
         let kb = KeyboardView(frame: NSRect(x: 0, y: 0, width: kbSize.width, height: kbSize.height))
         kb.store = store
         let pad: CGFloat = 16
@@ -350,34 +379,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var frames: [NSImage] = []
         for (i, layer) in store.layers.enumerated() {
             kb.layerIndex = i
-            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
-                                             pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
-                                             samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
-            else { continue }
-            rep.size = size
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-            NSColor(white: 0.13, alpha: 1).setFill()
-            NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 14, yRadius: 14).fill()
-            let title = "\(store.preset.name) — \(layer.displayName)"
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-                .foregroundColor: NSColor.white.withAlphaComponent(0.75)
-            ]
-            NSAttributedString(string: title, attributes: attrs)
-                .draw(at: NSPoint(x: pad, y: size.height - 14))
-            let ctx = NSGraphicsContext.current!.cgContext
-            ctx.translateBy(x: pad, y: pad)
-            kb.frame = NSRect(origin: .zero, size: kbSize)
-            kb.draw(kb.bounds)
-            NSGraphicsContext.restoreGraphicsState()
+            guard let rep = renderLayer(kb, size: size, pad: pad, title: "\(store.preset.name) — \(layer.displayName)") else { continue }
             if let png = rep.representation(using: .png, properties: [:]) {
                 let url = dir.appendingPathComponent("layer-\(i).png")
                 try? png.write(to: url)
                 print("wrote \(url.path)")
             }
             frames.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
+        }
+
+        if demo {
+            kb.heatmap = true
+            kb.layerIndex = 0
+            if let rep = renderLayer(kb, size: size, pad: pad,
+                                     title: "\(store.preset.name) — Heatmap 🔥") {
+                if let png = rep.representation(using: .png, properties: [:]) {
+                    let url = dir.appendingPathComponent("heatmap.png")
+                    try? png.write(to: url)
+                    print("wrote \(url.path)")
+                }
+            }
+        }
+
+        if demo, let rep = renderStatsPanel(size: NSSize(width: 480, height: 460)) {
+            if let png = rep.representation(using: .png, properties: [:]) {
+                let url = dir.appendingPathComponent("stats.png")
+                try? png.write(to: url)
+                print("wrote \(url.path)")
+            }
         }
 
         guard frames.count > 1 else { return }
@@ -400,6 +429,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 print("wrote \(url.path)")
             }
         }
+    }
+
+    private func renderLayer(_ kb: KeyboardView, size: NSSize, pad: CGFloat, title: String) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
+                                         pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { return nil }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor(white: 0.13, alpha: 1).setFill()
+        NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 14, yRadius: 14).fill()
+        let titleAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.75)
+        ]
+        NSAttributedString(string: title, attributes: titleAttrs)
+            .draw(at: NSPoint(x: pad, y: size.height - 14))
+        let status = "⚡ \(stats.wpm) WPM · 🔑 \(stats.todayKeys) · BT · 🔋 L 87% · R 74%"
+        let statusAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 9.5, weight: .regular),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.55)
+        ]
+        NSAttributedString(string: status, attributes: statusAttrs)
+            .draw(at: NSPoint(x: pad, y: 3))
+        let ctx = NSGraphicsContext.current!.cgContext
+        ctx.translateBy(x: pad, y: pad + 6)
+        kb.frame = NSRect(origin: .zero, size: kbSize)
+        kb.draw(kb.bounds)
+        NSGraphicsContext.restoreGraphicsState()
+        return rep
+    }
+
+    private func renderStatsPanel(size: NSSize) -> NSBitmapImageRep? {
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
+                                         pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
+                                         samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { return nil }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor(white: 0.13, alpha: 1).setFill()
+        NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 14, yRadius: 14).fill()
+        let heading = NSAttributedString(string: "통계", attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .bold),
+            .foregroundColor: NSColor.white
+        ])
+        heading.draw(at: NSPoint(x: 16, y: size.height - 26))
+        let para = NSMutableParagraphStyle()
+        para.lineSpacing = 2
+        let body = NSAttributedString(string: statsReport(), attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.85),
+            .paragraphStyle: para
+        ])
+        body.draw(in: NSRect(x: 16, y: 12, width: size.width - 32, height: size.height - 48))
+        NSGraphicsContext.restoreGraphicsState()
+        return rep
     }
 
     private var kbSize: NSSize {
@@ -478,7 +567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.setFrame(oldFrame, display: true)
         if kbView.layerIndex >= store.layers.count { kbView.layerIndex = 0 }
         styleLayerButtons()
-        refreshStatus()
+        refreshStatusFast()
     }
 
     private func buildStatsPanel() {
@@ -585,22 +674,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() }
     }
 
-    private func refreshStatus() {
-        statusLabel?.stringValue = "⚡ \(stats.wpm) WPM · 🔑 \(stats.todayKeys)"
+    private var cachedStatus = SystemStatus()
+
+    /// Composes the status line from cached data only — runs every second and
+    /// must never trigger the slow system_profiler probe (that alternation is
+    /// what made the label flicker).
+    private func refreshStatusFast() {
+        let fileName = store.keymapURL?.lastPathComponent ?? (store.lastError ?? "키맵 없음")
+        statusLabel?.stringValue = "⚡ \(stats.wpm) WPM · 🔑 \(stats.todayKeys) · "
+            + "\(store.preset.name) · \(cachedStatus.transport) \(cachedStatus.batteryText) · \(fileName)"
+    }
+
+    private func probeStatusSlow() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let st = SystemStatus.probe()
             DispatchQueue.main.async {
-                guard let self else { return }
-                var text = "\(self.store.preset.name) · \(st.transport)"
-                if let b = st.battery { text += " · 배터리 \(b)" }
-                let fileName = self.store.keymapURL?.lastPathComponent ?? (self.store.lastError ?? "키맵 없음")
-                self.statusLabel?.stringValue = "⚡ \(stats.wpm) WPM · 🔑 \(stats.todayKeys) · " + text + " · " + fileName
+                self?.cachedStatus = st
+                self?.refreshStatusFast()
             }
         }
     }
 
     private func refreshStatsText() {
         guard statsPanel.isVisible, let st = statsText else { return }
+        st.stringValue = statsReport()
+    }
+
+    func statsReport() -> String {
         var lines: [String] = []
         lines.append("오늘: \(stats.todayKeys)키 · 클릭 \(stats.todayClicks) · 스크롤 \(stats.todayScrolls)")
         lines.append("현재 \(stats.wpm) WPM · 누적 \(stats.totalKeys)키")
@@ -638,7 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 lines.append("\(name.padding(toLength: 6, withPad: " ", startingAt: 0)) \(secs / 60)분")
             }
         }
-        st.stringValue = lines.joined(separator: "\n")
+        return lines.joined(separator: "\n")
     }
 
     private func installHotkeys() {

@@ -78,6 +78,45 @@ final class StatsEngine {
         }
     }
 
+    // MARK: - Demo data (for exported screenshots; in-memory only)
+
+    /// Seeds plausible usage data so exported images show a lived-in
+    /// keyboard instead of empty counters. Never persisted.
+    func seedDemo() {
+        days.removeAll()
+        keyCounts.removeAll()
+        recentKeys.removeAll()
+
+        // QWERTY-plausible frequency profile (macOS virtual keycodes).
+        let demo: [(Int, Int)] = [
+            (49, 9800), (14, 6400), (0, 5900), (17, 5500), (1, 5400), (2, 5300),
+            (18, 4900), (37, 4600), (4, 4500), (15, 4300), (38, 4200), (11, 3800),
+            (32, 3600), (16, 3500), (40, 3400), (31, 3200), (36, 2600), (35, 2200),
+            (13, 2100), (45, 1800), (46, 1700), (9, 1600), (12, 1300), (43, 1200),
+            (39, 1100), (30, 900), (33, 800), (47, 700), (44, 650), (24, 500),
+            (27, 420), (51, 3900), (36 + 26, 300), (123, 950), (126, 870),
+            (124, 760), (125, 690), (117, 540), (48, 1100), (53, 260),
+        ]
+        for (c, n) in demo { keyCounts[c] = n }
+
+        let cal = Calendar.current
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let weekKeys = [12800, 9400, 11100, 13200, 8700, 12400, 10600]
+        for (i, keys) in weekKeys.enumerated() {
+            let d = cal.date(byAdding: .day, value: -(6 - i), to: Date())!
+            var ds = DayStats()
+            ds.keys = keys
+            ds.clicks = keys / 18
+            ds.scrolls = keys / 9
+            ds.layerSeconds = [0: 7 * 3600 + 240, 1: 1500, 2: 2600, 3: 420]
+            days[f.string(from: d)] = ds
+        }
+
+        let now = Date()
+        for i in 0..<330 { recentKeys.append(now - Double.random(in: 0...60)) }
+    }
+
     // MARK: - Queries
 
     /// Words per minute over the last 60 seconds (5 keystrokes per word).
