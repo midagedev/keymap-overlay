@@ -87,10 +87,24 @@ final class KeymapStore {
         if let p = UserDefaults.standard.string(forKey: "keymapPath") {
             return URL(fileURLWithPath: p)
         }
-        let sibling = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        // Candidate locations, most preferred first. #filePath only works
+        // for source-tree builds; the app bundle sits two levels under the
+        // repo when built with ./build.sh, so also probe relative to the
+        // executable and the user's common config locations.
+        var candidates: [URL] = []
+        let sourceSibling = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("zmk-config-charybdis/config/charybdis.keymap")
-        return FileManager.default.fileExists(atPath: sibling.path) ? sibling : nil
+        candidates.append(sourceSibling)
+        if let exe = Bundle.main.executableURL {
+            candidates.append(exe.deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("zmk-config-charybdis/config/charybdis.keymap"))
+        }
+        candidates.append(URL(fileURLWithPath: NSString(string: "~/repo-mid/zmk-config-charybdis/config/charybdis.keymap").expandingTildeInPath))
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     func load(from url: URL? = nil) {
