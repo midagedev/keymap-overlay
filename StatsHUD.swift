@@ -5,6 +5,9 @@ import Cocoa
 final class SparklineView: NSView {
     var values: [CGFloat] = [] { didSet { needsDisplay = true } }
     var lineHeight: CGFloat = 14
+    /// Offscreen export draws on a dark card; pass white there. Live HUD
+    /// keeps `labelColor` so it follows the system appearance.
+    var ink: NSColor = .labelColor
     override var isOpaque: Bool { false }
     override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: lineHeight) }
 
@@ -12,11 +15,10 @@ final class SparklineView: NSView {
         NSGraphicsContext.current?.shouldAntialias = false
         let n = max(values.count, 1)
         let slot = bounds.width / CGFloat(n)
-        let ink = NSColor.labelColor
         for (i, v) in values.enumerated() {
             let h = max(v > 0 ? 1 : 0, floor(bounds.height * v))
             guard h > 0 else { continue }
-            ink.withAlphaComponent(0.22 + v * 0.55).setFill()
+            ink.withAlphaComponent(0.28 + v * 0.62).setFill()
             NSRect(x: floor(CGFloat(i) * slot), y: 0, width: max(1, floor(slot - 0.4)), height: h).fill()
         }
     }

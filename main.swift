@@ -159,6 +159,9 @@ final class KeyboardView: NSView {
     var heldCodes: Set<Int> = []
     var heldCtrl = false
     var heldMouse: Set<Int> = []
+    /// Export / demo: light keys by the label they show, not by raw keycode.
+    /// Nav/Sym mains (`←`, `{`) do not share codes with the QWERTY tap.
+    var heldMains: Set<String> = []
     var autoSwitch = true
     var lastFn = 1
     var layerHold = 0
@@ -229,6 +232,7 @@ final class KeyboardView: NSView {
     }
 
     private func isHeld(_ kd: KeyCell) -> Bool {
+        if heldMains.contains(kd.main) { return true }
         if let b = kd.mb { return heldMouse.contains(b) }
         guard let code = kd.code else { return false }
         return heldCodes.contains(code) && (!kd.needsCtrl || heldCtrl)
@@ -277,6 +281,22 @@ final class KeyboardView: NSView {
         needsDisplay = true
     }
 
+    /// Export helper: light keys on the current layer by their main label.
+    func highlightMains(_ names: [String]) {
+        heldMains = Set(names.filter { !$0.isEmpty })
+        var keys = Set<Int>()
+        var mice = Set<Int>()
+        if store.layers.indices.contains(layerIndex) {
+            for c in store.layers[layerIndex].cells {
+                guard heldMains.contains(c.main) else { continue }
+                if let code = c.code { keys.insert(code) }
+                if let b = c.mb { mice.insert(b) }
+            }
+        }
+        heldCodes = keys
+        heldMouse = mice
+    }
+
     private func rectForComboDot(position: Int, cells: [(NSRect, KeyCell)]) -> NSPoint? {
         // Flat position → screen cell: grid rows 0-3 then thumbs.
         if position < 48 {
@@ -298,8 +318,22 @@ final class KeyboardView: NSView {
         let maxN = Double(stats.maxKeyCount)
         let n = Double(stats.keyCount(code))
         guard n > 0 else { return base }
-        let t = min(1.0, log(n + 1) / log(maxN + 1))
-        return NSColor(calibratedRed: 0.55 + 0.45 * t, green: 0.85 * (1 - t) + 0.1, blue: 0.2, alpha: 0.35 + 0.4 * t)
+        let t = CGFloat(min(1.0, log(n + 1) / log(maxN + 1)))
+        // Opaque mix — a translucent fill over a clear view reads as mud.
+        let warm = NSColor(calibratedRed: 0.93, green: 0.64, blue: 0.18, alpha: 1)
+        let hot = NSColor(calibratedRed: 0.84, green: 0.20, blue: 0.14, alpha: 1)
+        if t < 0.45 { return Self.mix(base, warm, t / 0.45) }
+        return Self.mix(warm, hot, (t - 0.45) / 0.55)
+    }
+
+    private static func mix(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
+        let t = max(0, min(1, t))
+        let ac = a.usingColorSpace(.deviceRGB) ?? a
+        let bc = b.usingColorSpace(.deviceRGB) ?? b
+        return NSColor(calibratedRed: ac.redComponent * (1 - t) + bc.redComponent * t,
+                       green: ac.greenComponent * (1 - t) + bc.greenComponent * t,
+                       blue: ac.blueComponent * (1 - t) + bc.blueComponent * t,
+                       alpha: 1)
     }
 
     func shaftRect() -> NSRect {
@@ -604,39 +638,120 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let pad: CGFloat = 16
         let size = NSSize(width: kbSize.width + pad * 2, height: kbSize.height + pad * 2 + 28)
+        // Signature holds so stills read as the layer, not an empty grid.
+        let signatures: [[String]] = [
+            ["A", "S", "D", "F"],
+            ["{", "}", "[", "]"],
+            ["←", "↓", "↑", "→"],
+            [],
+        ]
 
-        var frames: [NSImage] = []
+        var tour: [NSImage] = []
         for (i, layer) in store.layers.enumerated() {
             kb.layerIndex = i
-            Companion.shared.poseForExport(frame: i)
-            guard let rep = renderLayer(kb, size: size, pad: pad, title: "Vein  ·  \(layer.displayName)") else { continue }
+            kb.highlightMains(i < signatures.count ? signatures[i] : [])
+            Companion.shared.resetForExport()
+            Companion.shared.layout(in: kb.shaftRect())
+            Companion.shared.poseForExport(frame: i, letters: ["E", "T", "A", "N", "S", "R"])
+            if i < 3 {
+                Companion.shared.strike(.hrm, token: "E")
+                Companion.shared.stepExport(dt: 0.05)
+            }
+            let title = i == 3 ? "Vein  ·  Snipe · ball ×¼" : "Vein  ·  \(layer.displayName)"
+            guard let rep = renderLayer(kb, size: size, pad: pad, title: title) else { continue }
             writePNG(rep, to: dir.appendingPathComponent("layer-\(i).png"))
-            frames.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
+            // Snipe is all transparent — keep the PNG, leave it out of the tour.
+            if i < 3 {
+                tour.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
+            }
         }
+        kb.highlightMains([])
 
         if demo {
             kb.heatmap = true
             kb.layerIndex = 0
-            Companion.shared.poseForExport(frame: 1)
+            Companion.shared.resetForExport()
+            Companion.shared.layout(in: kb.shaftRect())
+            Companion.shared.poseForExport(frame: 1, letters: ["E", "T", "A", "N", "S", "R"])
             if let rep = renderLayer(kb, size: size, pad: pad, title: "Vein  ·  Heatmap") {
                 writePNG(rep, to: dir.appendingPathComponent("heatmap.png"))
             }
             kb.heatmap = false
-            if let rep = renderStatsHUD(size: NSSize(width: 360, height: 800)) {
+            if let rep = renderStatsHUD(size: NSSize(width: size.width, height: 600)) {
                 writePNG(rep, to: dir.appendingPathComponent("stats.png"))
             }
-            var mine: [NSImage] = []
-            let chips = ["E", "A", "T", "N", "O", "S", "H", "R"]
-            for i in 0..<8 {
-                Companion.shared.poseForExport(frame: i, letters: [chips[i]])
-                if let rep = renderLayer(kb, size: size, pad: pad, title: "Vein  ·  \(stats.wpm) WPM") {
-                    mine.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
-                }
-            }
-            writeGIF(mine, delay: 0.11, to: dir.appendingPathComponent("vein.gif"))
+            writeGIF(renderHeroGIF(kb, size: size, pad: pad), delay: 0.07,
+                     to: dir.appendingPathComponent("vein.gif"))
         }
 
-        writeGIF(frames, delay: 0.9, to: dir.appendingPathComponent("layers.gif"))
+        writeGIF(tour, delay: 1.1, to: dir.appendingPathComponent("layers.gif"))
+    }
+
+    /// Scripted typing: home-row holds, chips flying, then Sym / Nav.
+    private func renderHeroGIF(_ kb: KeyboardView, size: NSSize, pad: CGFloat) -> [NSImage] {
+        struct Beat {
+            let layer: Int
+            let mains: [String]
+            let kind: StrikeKind?
+            let token: String
+            let title: String
+            let linger: Int
+        }
+        func beat(_ layer: Int, _ mains: [String], _ kind: StrikeKind, _ token: String,
+                  _ title: String, linger: Int = 2) -> Beat {
+            Beat(layer: layer, mains: mains, kind: kind, token: token, title: title, linger: linger)
+        }
+        // Every captured frame keeps at least one key down. Snipe is all
+        // transparent — skip it. Home-row mods stay held across a word,
+        // then Sym / Nav fire the heavy layer bursts.
+        let script: [Beat] = [
+            beat(0, ["A"], .hrm, "A", "Base"),
+            beat(0, ["A", "E"], .tap, "E", "Base"),
+            beat(0, ["A", "T"], .tap, "T", "Base"),
+            beat(0, ["A", "S"], .hrm, "S", "Base"),
+            beat(0, ["A", "S", "D"], .hrm, "D", "Base"),
+            beat(0, ["A", "S", "D", "F"], .hrm, "F", "Base"),
+            beat(0, ["A", "S", "R"], .tap, "R", "Base"),
+            beat(0, ["F", "N"], .hrm, "N", "Base"),
+            beat(0, ["F", "C"], .hrm, "C", "Base"),
+            beat(0, ["F", "V"], .hrm, "V", "Base"),
+            beat(0, ["SPC"], .tap, "S", "Base"),
+            beat(1, ["{"], .layer, "{", "Sym", linger: 3),
+            beat(1, ["{", "}"], .layer, "}", "Sym", linger: 3),
+            beat(1, ["[", "]"], .layer, "[", "Sym", linger: 3),
+            beat(1, ["(", ")"], .layer, "(", "Sym", linger: 3),
+            beat(1, ["F1", "F2", "F3"], .layer, "F", "Sym"),
+            beat(2, ["←"], .layer, "←", "Nav", linger: 3),
+            beat(2, ["←", "↓"], .layer, "↓", "Nav", linger: 3),
+            beat(2, ["←", "↓", "↑", "→"], .layer, "↑", "Nav", linger: 3),
+            beat(2, ["🖱L", "←"], .layer, "M", "Nav"),
+            beat(0, ["E", "T"], .tap, "E", "Base"),
+            beat(0, ["T", "N"], .tap, "T", "Base"),
+            beat(0, ["A", "S", "T"], .hrm, "A", "Base"),
+        ]
+        var out: [NSImage] = []
+        kb.heatmap = false
+        Companion.shared.resetForExport()
+        Companion.shared.layout(in: kb.shaftRect())
+        Companion.shared.poseForExport(frame: 1, letters: ["E", "T", "A", "N", "S", "R"])
+        Companion.shared.strike(.hrm, token: "A")
+        Companion.shared.stepExport(dt: 0.05)
+        for beat in script {
+            kb.layerIndex = beat.layer
+            kb.highlightMains(beat.mains)
+            kb.setShift(false)
+            if let kind = beat.kind {
+                Companion.shared.strike(kind, token: beat.token)
+            }
+            for _ in 0..<beat.linger {
+                if let rep = renderLayer(kb, size: size, pad: pad, title: "Vein  ·  \(beat.title)") {
+                    out.append(NSImage(cgImage: rep.cgImage!, size: rep.size))
+                }
+                Companion.shared.stepExport(dt: 0.07)
+            }
+        }
+        kb.highlightMains([])
+        return out
     }
 
     private func writePNG(_ rep: NSBitmapImageRep, to url: URL) {
@@ -697,6 +812,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sparkShift.translateX(by: pad, yBy: 16)
         sparkShift.concat()
         let spark = SparklineView(frame: NSRect(x: 0, y: 0, width: size.width - pad * 2, height: 10))
+        spark.ink = .white
         spark.values = stats.rateSpark(60)
         spark.draw(spark.bounds)
         NSGraphicsContext.restoreGraphicsState()
@@ -723,45 +839,105 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         NSColor(white: 0.13, alpha: 1).setFill()
         NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 14, yRadius: 14).fill()
-        let lv = stats.levelInfo()
-        let heading = NSAttributedString(string: "Vein", attributes: [
-            .font: NSFont.systemFont(ofSize: 15, weight: .bold),
-            .foregroundColor: NSColor.white
-        ])
-        heading.draw(at: NSPoint(x: 18, y: size.height - 28))
-        let hero = NSAttributedString(string: "L\(lv.level) \(lv.title)  ·  \(stats.wpm) WPM  ·  오늘 \(stats.todayKeys)키",
-                                      attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.75)
-        ])
-        hero.draw(at: NSPoint(x: 18, y: size.height - 46))
 
-        func spark(_ title: String, y: CGFloat, h: CGFloat, values: [CGFloat]) {
-            NSAttributedString(string: title, attributes: [
-                .font: NSFont.systemFont(ofSize: 9, weight: .medium),
-                .foregroundColor: NSColor.white.withAlphaComponent(0.4)
-            ]).draw(at: NSPoint(x: 18, y: y + h + 2))
+        let ink = NSColor.white
+        let left: CGFloat = 20
+        let width = size.width - 40
+        var y = size.height - 26
+        let lv = stats.levelInfo()
+
+        func text(_ s: String, font: NSFont, alpha: CGFloat, at p: NSPoint) {
+            NSAttributedString(string: s, attributes: [
+                .font: font,
+                .foregroundColor: ink.withAlphaComponent(alpha)
+            ]).draw(at: p)
+        }
+        func caption(_ s: String) {
+            y -= 14
+            text(s, font: NSFont.systemFont(ofSize: 9, weight: .medium), alpha: 0.42, at: NSPoint(x: left, y: y))
+            y -= 3
+        }
+        func spark(_ values: [CGFloat], h: CGFloat) {
             NSGraphicsContext.saveGraphicsState()
             let t = NSAffineTransform()
-            t.translateX(by: 18, yBy: y)
+            t.translateX(by: left, yBy: y - h)
             t.concat()
-            let v = SparklineView(frame: NSRect(x: 0, y: 0, width: size.width - 36, height: h))
+            let v = SparklineView(frame: NSRect(x: 0, y: 0, width: width, height: h))
+            v.ink = ink
             v.values = values
             v.draw(v.bounds)
             NSGraphicsContext.restoreGraphicsState()
+            y -= h + 12
         }
-        spark("최근 60초", y: size.height - 92, h: 28, values: stats.rateSpark(60))
-        spark("오늘 시간대", y: size.height - 140, h: 22, values: stats.hourSpark())
-        spark("최근 7일", y: size.height - 182, h: 18, values: stats.weekSpark())
+        func bars(_ rows: [(String, CGFloat, String)]) {
+            let labelW: CGFloat = 64
+            let valW: CGFloat = 48
+            let barX = left + labelW + 6
+            let barW = width - labelW - valW - 10
+            let labelFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+            let valFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+            let valPara = NSMutableParagraphStyle()
+            valPara.alignment = .right
+            for (label, t, trailing) in rows {
+                y -= 14
+                text(label, font: labelFont, alpha: 0.78, at: NSPoint(x: left, y: y))
+                let track = NSRect(x: barX, y: y + 2, width: barW, height: 7)
+                ink.withAlphaComponent(0.10).setFill()
+                NSBezierPath(roundedRect: track, xRadius: 2, yRadius: 2).fill()
+                let fillW = max(2, floor(barW * max(0, min(1, t))))
+                ink.withAlphaComponent(0.72).setFill()
+                NSBezierPath(roundedRect: NSRect(x: barX, y: y + 2, width: fillW, height: 7),
+                             xRadius: 2, yRadius: 2).fill()
+                let val = NSAttributedString(string: trailing, attributes: [
+                    .font: valFont,
+                    .foregroundColor: ink.withAlphaComponent(0.55),
+                    .paragraphStyle: valPara
+                ])
+                val.draw(in: NSRect(x: barX + barW + 6, y: y, width: valW, height: 13))
+            }
+            y -= 10
+        }
 
-        let para = NSMutableParagraphStyle()
-        para.lineSpacing = 2
-        let body = NSAttributedString(string: statsReport(), attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.82),
-            .paragraphStyle: para
-        ])
-        body.draw(in: NSRect(x: 18, y: 14, width: size.width - 36, height: size.height - 210))
+        text("Vein", font: NSFont.systemFont(ofSize: 15, weight: .bold), alpha: 1,
+             at: NSPoint(x: left, y: y))
+        y -= 18
+        text("L\(lv.level) \(lv.title)  ·  \(stats.wpm) WPM  ·  오늘 \(stats.todayKeys)키",
+             font: NSFont.systemFont(ofSize: 11, weight: .medium), alpha: 0.72,
+             at: NSPoint(x: left, y: y))
+        y -= 8
+
+        caption("최근 60초")
+        spark(stats.rateSpark(60), h: 26)
+        caption("오늘 시간대")
+        spark(stats.hourSpark(), h: 20)
+        caption("최근 7일")
+        spark(stats.weekSpark(), h: 16)
+
+        caption("자주 쓰는 키")
+        let top = stats.topKeys(8)
+        let topMax = CGFloat(max(top.first?.count ?? 1, 1))
+        bars(top.map { (StatsEngine.labelFor($0.code), CGFloat($0.count) / topMax, "\($0.count)") })
+
+        caption("손가락")
+        let fingers = stats.fingerCounts
+        let fingerTotal = max(fingers.map(\.count).reduce(0, +), 1)
+        bars(fingers.map { f in
+            let pct = f.count * 100 / fingerTotal
+            return (f.finger, CGFloat(pct) / 100, "\(pct)%")
+        })
+
+        let layerSecs = stats.todayLayerSeconds
+        if !layerSecs.isEmpty {
+            caption("레이어")
+            let names = ["Base", "Sym", "Nav", "Snipe"]
+            let peak = CGFloat(max(layerSecs.values.max() ?? 1, 1))
+            let rows = layerSecs.sorted { $0.key < $1.key }.map { layer, secs -> (String, CGFloat, String) in
+                let name = layer < names.count ? names[layer] : "L\(layer)"
+                return (name, CGFloat(secs) / peak, "\(secs / 60)분")
+            }
+            bars(rows)
+        }
+
         NSGraphicsContext.restoreGraphicsState()
         return rep
     }
@@ -949,6 +1125,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !kbView.autoHideEnabled { kbView.noteActivity() }
     }
 
+    @objc func pickSkin(_ sender: NSMenuItem) {
+        guard ArtBank.skins.indices.contains(sender.tag) else { return }
+        Companion.shared.setSkin(ArtBank.skins[sender.tag].id)
+        kbView.needsDisplay = true
+        statusItem?.button?.image = Companion.shared.menuImage()
+    }
+
     @objc func pickLayer(_ sender: NSButton) {
         kbView.layerIndex = sender.tag
     }
@@ -1011,6 +1194,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(checkItem("히트맵", on: kbView.heatmap, action: #selector(toggleHeatmap(_:))))
         menu.addItem(checkItem("학습 모드", on: kbView.learningMode, action: #selector(toggleLearning(_:))))
         menu.addItem(checkItem("자동 숨김", on: kbView.autoHideEnabled, action: #selector(toggleAutoHide(_:))))
+        menu.addItem(.separator())
+        let skins = NSMenu()
+        for (i, skin) in ArtBank.skins.enumerated() {
+            let item = NSMenuItem(title: skin.title, action: #selector(pickSkin(_:)), keyEquivalent: "")
+            item.tag = i
+            item.state = skin.id == Companion.shared.skinId ? .on : .off
+            item.target = self
+            skins.addItem(item)
+        }
+        let skinItem = NSMenuItem(title: "캐릭터", action: nil, keyEquivalent: "")
+        skinItem.submenu = skins
+        menu.addItem(skinItem)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp

@@ -62,6 +62,14 @@ final class Companion {
     var shaftTarget: NSPoint = .zero
     var onFrame: (() -> Void)?
 
+    var skinId: String { ArtBank.currentId }
+
+    func setSkin(_ id: String) {
+        ArtBank.setSkin(id)
+        frameIndex = 0
+        onFrame?()
+    }
+
     private init() {
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             self?.tick()
@@ -122,25 +130,62 @@ final class Companion {
         for s in letters { plant(firstChar(s)) }
     }
 
+    /// Clear chips / depth so a GIF script starts from a known pose.
+    func resetForExport() {
+        motes.removeAll()
+        depth = 28
+        shake = 0
+        pulse = 0
+        bobKick = 3.2
+        bobPhase = 0
+        mood = .dig
+        frameIndex = 0
+    }
+
+    /// Advance motes / bob without waiting on the real clock (GIF export).
+    func stepExport(dt: CGFloat = 0.08) {
+        mood = .dig
+        let n = ArtBank.ready ? ArtBank.count(.dig) : 4
+        if n > 0 { frameIndex = (frameIndex + 1) % n }
+        bobPhase += dt * 52
+        if pulse > 0.05 { pulse *= 0.78 } else { pulse = 0 }
+        if shake > 0.05 { shake *= 0.72 } else { shake = 0 }
+        if !motes.isEmpty {
+            for i in motes.indices {
+                motes[i].x += motes[i].vx * dt
+                motes[i].y += motes[i].vy * dt
+                motes[i].vx *= 0.97
+                motes[i].vy -= 380 * dt
+                motes[i].angle += motes[i].spin * dt
+                motes[i].life -= dt / 0.85
+            }
+            motes.removeAll { $0.life <= 0 }
+        }
+    }
+
     private func firstChar(_ raw: String) -> Character {
-        if let first = raw.first, first == "·" || first.isASCII { return first }
-        return "·"
+        guard let first = raw.first else { return "·" }
+        if first == "·" || first.isASCII { return first }
+        switch first {
+        case "←", "→", "↑", "↓": return first
+        default: return first.isLetter ? first : "·"
+        }
     }
 
     private func burst(_ raw: String, count: Int, speed: CGFloat) {
         let ch = firstChar(raw)
         for _ in 0..<count {
-            if motes.count >= 22 { motes.removeFirst() }
+            if motes.count >= 40 { motes.removeFirst() }
             motes.append(GlyphMote(
-                x: shaftTarget.x + CGFloat.random(in: -5...5),
-                y: shaftTarget.y + CGFloat.random(in: -2...2),
-                vx: CGFloat.random(in: -55...55) * speed,
-                vy: CGFloat.random(in: 70...140) * speed,
+                x: shaftTarget.x + CGFloat.random(in: -6...6),
+                y: shaftTarget.y + CGFloat.random(in: -2...4),
+                vx: CGFloat.random(in: -170...170) * speed,
+                vy: CGFloat.random(in: 90...200) * speed,
                 life: 1,
                 ch: ch,
-                pixel: CGFloat.random(in: 0.8...1.35),
-                angle: CGFloat.random(in: -0.9...0.9),
-                spin: CGFloat.random(in: -6...6)
+                pixel: CGFloat.random(in: 1.05...1.85),
+                angle: CGFloat.random(in: -1.0...1.0),
+                spin: CGFloat.random(in: -7...7)
             ))
         }
     }
@@ -397,7 +442,18 @@ final class Companion {
     }
 }
 
+struct CompanionSkin {
+    let id: String
+    let title: String
+}
+
 enum ArtBank {
+    static let skins: [CompanionSkin] = [
+        CompanionSkin(id: "miner", title: "광부"),
+        CompanionSkin(id: "mole", title: "두더지"),
+        CompanionSkin(id: "cart", title: "광차"),
+    ]
+
     private static var didLoad = false
     private static var dig: [NSImage] = []
     private static var idle: [NSImage] = []
@@ -407,6 +463,18 @@ enum ArtBank {
     static var displayWidth: CGFloat = 20
     static var gridW = 20
     static var gridH = 28
+    static var currentId: String {
+        UserDefaults.standard.string(forKey: "companionSkin") ?? "miner"
+    }
+
+    static func setSkin(_ id: String) {
+        UserDefaults.standard.set(id, forKey: "companionSkin")
+        didLoad = false
+        dig = []
+        idle = []
+        menu = nil
+        load()
+    }
 
     static var ready: Bool {
         load()
@@ -445,7 +513,10 @@ enum ArtBank {
             .deletingLastPathComponent()
             .appendingPathComponent("assets/fx"))
         guard let dir = dirs.first(where: { fm.fileExists(atPath: $0.path) }) else { return }
-        if let data = try? Data(contentsOf: dir.appendingPathComponent("miner.json")),
+        let prefix = currentId
+        let metaName = fm.fileExists(atPath: dir.appendingPathComponent("\(prefix).json").path)
+            ? "\(prefix).json" : "miner.json"
+        if let data = try? Data(contentsOf: dir.appendingPathComponent(metaName)),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             if let v = obj["tipX"] as? Double { tipX = CGFloat(v) }
             if let v = obj["tipY"] as? Double { tipY = CGFloat(v) }
@@ -455,18 +526,18 @@ enum ArtBank {
         }
         var i = 0
         while true {
-            let url = dir.appendingPathComponent("miner-dig-\(i).png")
+            let url = dir.appendingPathComponent("\(prefix)-dig-\(i).png")
             guard let img = NSImage(contentsOf: url) else { break }
             img.isTemplate = false
             img.size = NSSize(width: gridW, height: gridH)
             dig.append(img)
             i += 1
         }
-        if let idleImg = NSImage(contentsOf: dir.appendingPathComponent("miner-idle-0.png")) {
+        if let idleImg = NSImage(contentsOf: dir.appendingPathComponent("\(prefix)-idle-0.png")) {
             idleImg.size = NSSize(width: gridW, height: gridH)
             idle = [idleImg]
         }
-        if let menuImg = NSImage(contentsOf: dir.appendingPathComponent("miner-menu.png")) {
+        if let menuImg = NSImage(contentsOf: dir.appendingPathComponent("\(prefix)-menu.png")) {
             menuImg.isTemplate = true
             menu = menuImg
         }
@@ -674,6 +745,16 @@ enum LCDFont {
         "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
         "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
         "9": ["01110", "10001", "10001", "01111", "00001", "10001", "01110"],
+        "{": ["00110", "01000", "01000", "11000", "01000", "01000", "00110"],
+        "}": ["01100", "00010", "00010", "00011", "00010", "00010", "01100"],
+        "[": ["01110", "01000", "01000", "01000", "01000", "01000", "01110"],
+        "]": ["01110", "00010", "00010", "00010", "00010", "00010", "01110"],
+        "(": ["00110", "01000", "01000", "01000", "01000", "01000", "00110"],
+        ")": ["01100", "00010", "00010", "00010", "00010", "00010", "01100"],
+        "←": ["00100", "01000", "11111", "01000", "00100", "00000", "00000"],
+        "→": ["00100", "00010", "11111", "00010", "00100", "00000", "00000"],
+        "↑": ["00100", "01110", "10101", "00100", "00100", "00100", "00100"],
+        "↓": ["00100", "00100", "00100", "00100", "10101", "01110", "00100"],
     ]
 }
 
